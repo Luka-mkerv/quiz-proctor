@@ -15,13 +15,38 @@ function registerSocketHandlers(io) {
   io.on('connection', (socket) => {
     console.log('Socket connected:', socket.id);
 
-    socket.on('student:join', async (payload) => {
-      const { quizId, submissionId, studentName } = payload || {};
+    socket.on('student:join', async () => {
+      // Identity is derived entirely from the JWT supplied at connect time
+      // in socket.handshake.auth.token — the event payload is just a trigger.
+      const { token } = socket.handshake.auth || {};
 
-      if (!quizId || !submissionId || !studentName) {
-        socket.emit('error', { message: 'student:join requires quizId, submissionId, studentName' });
+      if (!token) {
+        console.error(`[student:join] ${socket.id} — no token in socket.handshake.auth`);
+        socket.emit('error', { message: 'Student JWT required in socket handshake auth' });
+        socket.disconnect(true);
         return;
       }
+
+      let jwtPayload;
+      try {
+        jwtPayload = jwt.verify(token, process.env.JWT_SECRET);
+      } catch (err) {
+        console.error(`[student:join] ${socket.id} — JWT verification failed:`, err.message);
+        socket.emit('error', { message: 'Invalid or expired student token' });
+        socket.disconnect(true);
+        return;
+      }
+
+      const { quizId, submissionId, email } = jwtPayload;
+
+      if (!quizId || !submissionId || !email) {
+        console.error(`[student:join] ${socket.id} — JWT payload missing fields:`, { quizId, submissionId, email });
+        socket.emit('error', { message: 'Malformed student token' });
+        socket.disconnect(true);
+        return;
+      }
+
+      console.log(`[student:join] ${socket.id} — email=${email} quizId=${quizId} submissionId=${submissionId}`);
 
       try {
         const { rows } = await pool.query(
@@ -31,9 +56,11 @@ function registerSocketHandlers(io) {
         );
 
         if (!rows[0]) {
+          console.error(`[student:join] ${socket.id} — submission not found or already submitted (submissionId=${submissionId}, quizId=${quizId})`);
           socket.emit('error', {
             message: 'Submission not found, does not belong to this quiz, or already submitted',
           });
+          socket.disconnect(true);
           return;
         }
 
@@ -43,11 +70,14 @@ function registerSocketHandlers(io) {
           role: 'student',
           quizId: Number(quizId),
           submissionId: Number(submissionId),
-          studentName,
+          studentName: email,
         };
+        console.log(`[student:join] ${socket.id} — joined room ${room} as ${email}`);
+        socket.emit('student:joined', { quizId: Number(quizId) });
       } catch (err) {
-        console.error('student:join error:', err);
+        console.error(`[student:join] ${socket.id} — DB error:`, err);
         socket.emit('error', { message: 'Internal server error' });
+        socket.disconnect(true);
       }
     });
 

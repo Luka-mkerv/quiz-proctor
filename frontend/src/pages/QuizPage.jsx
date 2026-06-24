@@ -5,12 +5,21 @@ import axios from 'axios';
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 
-// Separate instance — no auth header injected for public routes.
+// Separate instance — auth header is injected per-request for student routes.
 const publicApi = axios.create({ baseURL: BASE_URL });
 
 function formatTime(totalSeconds) {
   const s = Math.max(0, Math.floor(totalSeconds));
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function decodeJwtPayload(token) {
+  try {
+    const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(base64));
+  } catch {
+    return null;
+  }
 }
 
 export default function QuizPage() {
@@ -21,39 +30,82 @@ export default function QuizPage() {
   const [quiz, setQuiz] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
 
-  // Name entry
-  const [studentName, setStudentName] = useState('');
-  const [nameError, setNameError] = useState('');
-  const [starting, setStarting] = useState(false);
+  // Login form
+  const [studentEmail, setStudentEmail] = useState('');
+  const [studentPassword, setStudentPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loggingIn, setLoggingIn] = useState(false);
 
   // Active quiz UI
   const [answers, setAnswers] = useState({});
-  const [timeLeft, setTimeLeft] = useState(null); // seconds, null = no timer
+  const [timeLeft, setTimeLeft] = useState(null);
   const [socketWarning, setSocketWarning] = useState('');
   const [inFullscreen, setInFullscreen] = useState(false);
-  const [graceCountdown, setGraceCountdown] = useState(null); // null = inactive, 6→0 = counting
+  const [graceCountdown, setGraceCountdown] = useState(null);
 
-  // Mutable state used inside closures — always current, no stale captures.
+  // Mutable state used inside closures.
+  const studentTokenRef = useRef(null);
   const socketRef = useRef(null);
   const submissionIdRef = useRef(null);
   const submittedRef = useRef(false);
-  const violationCooldownRef = useRef({}); // { [type]: lastEmitMs }
-  const blurTimerRef = useRef(null);       // pending (debounced) window_blur emit
-  const lastLeaveRef = useRef(0);          // last tab_switch / fullscreen_exit time
-  const autosaveTimersRef = useRef({});    // { [questionId]: timeoutId }
+  const violationCooldownRef = useRef({});
+  const blurTimerRef = useRef(null);
+  const lastLeaveRef = useRef(0);
+  const autosaveTimersRef = useRef({});
   const timerRef = useRef(null);
-  const graceIntervalRef = useRef(null);   // setInterval id for the strict grace countdown
+  const graceIntervalRef = useRef(null);
   const monitorCleanupRef = useRef(null);
-  const submitReasonRef = useRef(null);    // null | 'violation' — set when grace expires
+  const submitReasonRef = useRef(null);
+  const isJoinedRef = useRef(false);
 
   // --- Initial quiz fetch ---
   useEffect(() => {
+    // Strict Mode in development double-invokes effects (run → cleanup → run).
+    // The cleanup sets canceled = true so the first run's stale .then() is a
+    // no-op, preventing it from creating duplicate side-effects alongside the
+    // second run.
+    let canceled = false;
+
     publicApi.get(`/api/public/quizzes/${quizId}`)
       .then(({ data }) => {
+        if (canceled) return;
         setQuiz(data);
+
+        // Try to restore an in-progress session from this tab.
+        const sessionStr = sessionStorage.getItem(`studentSession_${quizId}`);
+        if (sessionStr) {
+          try {
+            const sess = JSON.parse(sessionStr);
+            const payload = decodeJwtPayload(sess.token);
+            if (
+              payload &&
+              String(payload.quizId) === String(quizId) &&
+              payload.exp * 1000 > Date.now()
+            ) {
+              studentTokenRef.current = sess.token;
+              submissionIdRef.current = sess.submissionId;
+
+              const init = {};
+              data.questions.forEach((q) => { init[q.id] = ''; });
+              setAnswers(init);
+
+              startTimer(sess.startedAt, sess.durationSeconds);
+              monitorCleanupRef.current = setupMonitoring(data.monitoringMode === 'strict');
+
+              // Socket is created by the socket useEffect below once phase
+              // becomes 'active' — do NOT create it here.
+              setPhase('active');
+              return;
+            }
+          } catch {
+            sessionStorage.removeItem(`studentSession_${quizId}`);
+          }
+        }
+
         setPhase('entry');
       })
       .catch((err) => {
+        if (canceled) return;
         const status = err.response?.status;
         if (status === 404) {
           setErrorMsg('Quiz not found.');
@@ -64,10 +116,57 @@ export default function QuizPage() {
         }
         setPhase('error');
       });
-  }, [quizId]);
+
+    return () => { canceled = true; };
+  }, [quizId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- Full teardown on unmount ---
-  useEffect(() => () => teardown(), []);
+  useEffect(() => () => teardown(), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // --- Socket connection ---
+  // Created here — after the component has committed the 'active' phase —
+  // rather than inside handleLogin or the quiz fetch callback. Creating a
+  // socket inside an event handler races with React 18 concurrent-mode render
+  // aborts: when React discards an in-progress render it runs committed-effect
+  // cleanups (including teardown), which disconnects a socket that was created
+  // before the state updates were committed, causing the immediate disconnect.
+  useEffect(() => {
+    if (phase !== 'active') return;
+
+    const token = studentTokenRef.current;
+    const subId = submissionIdRef.current;
+    if (!token || !subId) return;
+
+    const socket = io(BASE_URL, {
+      auth: { token },
+      transports: ['websocket', 'polling'],
+    });
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      isJoinedRef.current = false;
+      socket.emit('student:join', {
+        quizId: Number(quizId),
+        submissionId: Number(subId),
+      });
+    });
+
+    socket.on('student:joined', () => {
+      isJoinedRef.current = true;
+      setSocketWarning('');
+    });
+
+    socket.on('error', (err) => {
+      console.error('[socket error event]', err);
+      setSocketWarning('Monitoring connection issue — your answers are still being saved.');
+    });
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+      isJoinedRef.current = false;
+    };
+  }, [phase, quizId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function teardown() {
     if (timerRef.current) {
@@ -95,23 +194,19 @@ export default function QuizPage() {
     } catch {}
   }
 
-  // Per-type cooldown: if the same violation type fired in the last 500ms, skip it.
-  // This prevents blur + visibilitychange from double-reporting a single tab switch.
   function emitViolation(type) {
+    if (!isJoinedRef.current) {
+      console.log('[violation gated — not yet joined]', type);
+      return;
+    }
     const now = Date.now();
     if (now - (violationCooldownRef.current[type] ?? 0) < 500) return;
     violationCooldownRef.current[type] = now;
+    console.log('[violation:report emit]', type);
     socketRef.current?.emit('violation:report', { type });
   }
 
   function setupMonitoring(isStrict) {
-    // Tab switch and fullscreen exit are the meaningful "left the quiz" signals.
-    // The browser also fires a window `blur` alongside each of them, so reporting
-    // every blur would double- or triple-count a single action (the "blur in
-    // between" a fullscreen exit and a tab switch). We therefore debounce blur
-    // and drop it when a leave event happened just before or just after it.
-    // A genuinely standalone blur (e.g. switching to another application while
-    // staying on the tab) is still reported after the short delay.
     const noteLeave = () => {
       lastLeaveRef.current = Date.now();
       clearTimeout(blurTimerRef.current);
@@ -134,9 +229,7 @@ export default function QuizPage() {
       clearTimeout(blurTimerRef.current);
       blurTimerRef.current = setTimeout(() => {
         blurTimerRef.current = null;
-        // Tab is hidden → it's a tab switch, already reported as tab_switch.
         if (document.hidden) return;
-        // A tab switch / fullscreen exit fired around this blur → it's noise.
         if (Date.now() - lastLeaveRef.current < 1200) return;
         onLeaveViolation('window_blur');
       }, 500);
@@ -158,12 +251,14 @@ export default function QuizPage() {
     document.addEventListener('fullscreenchange', onFullscreen);
 
     // Strict mode: beacon-submit if the student closes the tab entirely mid-quiz.
-    // sendBeacon is fire-and-forget and works without auth headers (public route).
+    // sendBeacon cannot set headers, so the token is appended as a query param.
     let onBeforeUnload = null;
     if (isStrict) {
       onBeforeUnload = () => {
         if (submittedRef.current || !submissionIdRef.current) return;
-        const url = `${BASE_URL}/api/public/submissions/${submissionIdRef.current}/submit`;
+        const token = studentTokenRef.current;
+        const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+        const url = `${BASE_URL}/api/public/submissions/${submissionIdRef.current}/submit${tokenParam}`;
         const blob = new Blob([JSON.stringify({ autoSubmitted: true })], { type: 'application/json' });
         navigator.sendBeacon(url, blob);
       };
@@ -180,7 +275,6 @@ export default function QuizPage() {
     };
   }
 
-  // Starts the 6-second grace countdown; no-op if already counting (modal already visible).
   function startGraceCountdown() {
     if (graceIntervalRef.current) return;
     let count = 6;
@@ -204,17 +298,13 @@ export default function QuizPage() {
     try {
       await document.documentElement.requestFullscreen();
       setInFullscreen(true);
-    } catch {
-      // Browser denied — exam continues; existing banner handles the no-fullscreen state.
-    }
+    } catch {}
   }
 
   async function handleReenterFullscreen() {
     try {
       await document.documentElement.requestFullscreen();
-    } catch {
-      // Browser denied the request; the banner stays until the student retries.
-    }
+    } catch {}
   }
 
   function startTimer(startedAt, durationSeconds) {
@@ -233,83 +323,78 @@ export default function QuizPage() {
       setTimeLeft(remaining);
     };
 
-    tick(); // show immediately; don't wait 1 second for first render
+    tick();
     timerRef.current = setInterval(tick, 1000);
   }
 
-  async function handleBegin() {
-    const name = studentName.trim();
-    if (!name) {
-      setNameError('Please enter your name to begin.');
+  async function handleLogin() {
+    const email = studentEmail.trim();
+    const password = studentPassword;
+
+    if (!email) {
+      setLoginError('Please enter your email address.');
       return;
     }
-    setNameError('');
-    setStarting(true);
+    if (!password) {
+      setLoginError('Please enter your password.');
+      return;
+    }
+
+    setLoginError('');
+    setLoggingIn(true);
 
     try {
-      const { data } = await publicApi.post(`/api/public/quizzes/${quizId}/start`, {
-        studentName: name,
+      const { data } = await publicApi.post(`/api/public/quizzes/${quizId}/login`, {
+        email,
+        password,
       });
 
+      studentTokenRef.current = data.token;
       submissionIdRef.current = data.submissionId;
 
-      // Must be called from a user-gesture context (button click) for browsers to allow it.
+      // Store session in sessionStorage so this tab can auto-resume after a refresh.
+      // sessionStorage clears when the tab closes — correct for an exam session.
+      sessionStorage.setItem(`studentSession_${quizId}`, JSON.stringify({
+        token: data.token,
+        submissionId: data.submissionId,
+        startedAt: data.startedAt,
+        durationSeconds: data.durationSeconds,
+      }));
+
       try {
         await document.documentElement.requestFullscreen();
         setInFullscreen(true);
       } catch {
-        // Browser may deny — don't block the quiz; banner will appear since inFullscreen stays false.
+        // Browser denied — banner appears, student can re-enter manually.
       }
 
-      // Socket connection
-      const socket = io(BASE_URL, { transports: ['websocket', 'polling'] });
-      socketRef.current = socket;
-
-      socket.on('connect', () => {
-        socket.emit('student:join', {
-          quizId: Number(quizId),
-          submissionId: data.submissionId,
-          studentName: name,
-        });
-      });
-
-      socket.on('error', (payload) => {
-        console.warn('[socket] error:', payload);
-        setSocketWarning('Monitoring connection issue — your answers are still being saved.');
-      });
-
-      // Violation listeners
+      // Socket is created by the socket useEffect once phase becomes 'active'.
       monitorCleanupRef.current = setupMonitoring(quiz.monitoringMode === 'strict');
 
-      // Blank answer state for every question
       const init = {};
       quiz.questions.forEach((q) => { init[q.id] = ''; });
       setAnswers(init);
 
-      // Timer (no-op if quiz has no durationSeconds)
       startTimer(data.startedAt, data.durationSeconds);
 
       setPhase('active');
     } catch (err) {
       const status = err.response?.status;
-      if (status === 409) {
-        setErrorMsg('You have already submitted this quiz.');
-        setPhase('error');
-      } else if (status === 403) {
-        setErrorMsg('This quiz is no longer open.');
-        setPhase('error');
+      const msg = err.response?.data?.error;
+      if (status === 401 || status === 403) {
+        setLoginError(msg || 'Login failed.');
+      } else if (status === 404) {
+        setLoginError('Quiz not found.');
       } else {
-        setNameError('Could not start the quiz. Please try again.');
+        setLoginError('Could not connect. Please try again.');
       }
     } finally {
-      setStarting(false);
+      setLoggingIn(false);
     }
   }
 
   function handleAnswerChange(questionId, value) {
     setAnswers((prev) => ({ ...prev, [questionId]: value }));
-
-    // Debounce autosave — reset timer on each keystroke
     clearTimeout(autosaveTimersRef.current[questionId]);
     autosaveTimersRef.current[questionId] = setTimeout(() => {
       saveAnswer(questionId, value);
@@ -318,7 +403,6 @@ export default function QuizPage() {
   }
 
   function handleAnswerBlur(questionId, value) {
-    // Flush on blur so leaving a field saves immediately
     clearTimeout(autosaveTimersRef.current[questionId]);
     delete autosaveTimersRef.current[questionId];
     saveAnswer(questionId, value);
@@ -327,10 +411,11 @@ export default function QuizPage() {
   async function saveAnswer(questionId, answerText) {
     if (!submissionIdRef.current || submittedRef.current) return;
     try {
-      await publicApi.post(`/api/public/submissions/${submissionIdRef.current}/answers`, {
-        questionId,
-        answerText,
-      });
+      await publicApi.post(
+        `/api/public/submissions/${submissionIdRef.current}/answers`,
+        { questionId, answerText },
+        { headers: { Authorization: `Bearer ${studentTokenRef.current}` } }
+      );
     } catch {
       // Silent — autosave failures shouldn't distract students mid-exam.
     }
@@ -341,7 +426,6 @@ export default function QuizPage() {
     submittedRef.current = true;
 
     if (graceIntervalRef.current) { clearInterval(graceIntervalRef.current); graceIntervalRef.current = null; }
-    // Stop timer and monitoring before any async work
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (monitorCleanupRef.current) { monitorCleanupRef.current(); monitorCleanupRef.current = null; }
     if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
@@ -351,12 +435,17 @@ export default function QuizPage() {
     } catch {}
 
     try {
-      await publicApi.post(`/api/public/submissions/${submissionIdRef.current}/submit`, {
-        autoSubmitted,
-      });
+      await publicApi.post(
+        `/api/public/submissions/${submissionIdRef.current}/submit`,
+        { autoSubmitted },
+        { headers: { Authorization: `Bearer ${studentTokenRef.current}` } }
+      );
     } catch {
       // Backend enforces submission independently; show success regardless.
     }
+
+    // Clear the session token now that the exam is over.
+    sessionStorage.removeItem(`studentSession_${quizId}`);
 
     setPhase('submitted');
   }
@@ -437,42 +526,61 @@ export default function QuizPage() {
           </p>
 
           <form
-            onSubmit={(e) => { e.preventDefault(); handleBegin(); }}
-            className="mt-7 space-y-5"
+            onSubmit={(e) => { e.preventDefault(); handleLogin(); }}
+            className="mt-7 space-y-4"
           >
             <div>
-              <label htmlFor="studentName" className="mb-1.5 block text-sm font-medium text-gray-700">
-                Your name
+              <label htmlFor="studentEmail" className="mb-1.5 block text-sm font-medium text-gray-700">
+                Email address
               </label>
               <input
-                id="studentName"
-                type="text"
-                value={studentName}
-                onChange={(e) => setStudentName(e.target.value)}
-                placeholder="Enter your full name"
+                id="studentEmail"
+                type="email"
+                value={studentEmail}
+                onChange={(e) => setStudentEmail(e.target.value)}
+                placeholder="you@university.edu"
                 autoFocus
+                autoComplete="email"
                 className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
               />
-              {nameError && (
-                <p className="mt-1.5 text-xs font-medium text-red-600">{nameError}</p>
-              )}
             </div>
+
+            <div>
+              <label htmlFor="studentPassword" className="mb-1.5 block text-sm font-medium text-gray-700">
+                Password
+              </label>
+              <input
+                id="studentPassword"
+                type="password"
+                value={studentPassword}
+                onChange={(e) => setStudentPassword(e.target.value)}
+                placeholder="Enter your exam password"
+                autoComplete="current-password"
+                className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+              />
+            </div>
+
+            {loginError && (
+              <p className="rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm font-medium text-red-700">
+                {loginError}
+              </p>
+            )}
 
             <div className="flex items-start gap-2.5 rounded-lg bg-gray-50 px-3.5 py-3 text-xs leading-relaxed text-gray-500 ring-1 ring-inset ring-gray-200">
               <svg className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
               </svg>
               <span>
-                This quiz is proctored. Your browser will enter fullscreen and activity is monitored for the duration.
+                This exam is proctored. Your browser will enter fullscreen and activity is monitored for the duration.
               </span>
             </div>
 
             <button
               type="submit"
-              disabled={starting}
+              disabled={loggingIn}
               className="inline-flex w-full items-center justify-center rounded-lg bg-indigo-600 py-3 text-sm font-semibold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.99] focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-indigo-300"
             >
-              {starting ? 'Starting…' : 'Begin Quiz'}
+              {loggingIn ? 'Verifying…' : 'Enter Exam'}
             </button>
           </form>
         </div>
@@ -483,7 +591,7 @@ export default function QuizPage() {
   // phase === 'active'
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Strict-mode grace countdown overlay — non-dismissible except via the button */}
+      {/* Strict-mode grace countdown overlay */}
       {graceCountdown !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/80 backdrop-blur-sm">
           <div className="mx-4 w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-2xl ring-1 ring-gray-900/10">
@@ -517,7 +625,7 @@ export default function QuizPage() {
         </div>
       )}
 
-      {/* Sticky top bar: title, countdown, monitoring badge */}
+      {/* Sticky top bar */}
       <div className="sticky top-0 z-10 border-b border-gray-200 bg-white/85 backdrop-blur supports-[backdrop-filter]:bg-white/70">
         <div className="mx-auto flex max-w-2xl items-center justify-between gap-4 px-6 py-3.5">
           <span className="truncate text-sm font-semibold tracking-tight text-gray-900">{quiz.title}</span>
@@ -543,14 +651,12 @@ export default function QuizPage() {
         </div>
       </div>
 
-      {/* Socket warning — only shown if connection issue */}
       {socketWarning && (
         <div className="border-b border-yellow-200 bg-yellow-50 px-6 py-2.5 text-center text-xs text-yellow-800">
           {socketWarning}
         </div>
       )}
 
-      {/* Fullscreen re-entry banner — non-blocking, student can still answer questions */}
       {!inFullscreen && (
         <div className="flex items-center justify-between gap-4 border-b border-amber-200 bg-amber-50 px-6 py-3">
           <p className="text-sm font-medium text-amber-800">

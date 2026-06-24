@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import api from '../lib/api.js';
 
@@ -14,10 +14,41 @@ const STATUS_ACTIONS = [
   { label: 'Close', value: 'closed' },
 ];
 
+const SUB_STATUS_STYLES = {
+  not_started: 'bg-gray-100 text-gray-500',
+  in_progress: 'bg-amber-50 text-amber-700',
+  submitted:   'bg-green-50 text-green-700',
+};
+
+const SUB_STATUS_LABELS = {
+  not_started: 'Not started',
+  in_progress: 'In progress',
+  submitted:   'Submitted',
+};
+
 function formatDuration(seconds) {
   if (!seconds) return 'No time limit';
   const mins = Math.round(seconds / 60);
   return `${mins} minute${mins !== 1 ? 's' : ''}`;
+}
+
+function parseRosterText(text) {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const students = [];
+  const errors = [];
+
+  for (const line of lines) {
+    const parts = line.split(',').map((p) => p.trim());
+    if (parts.length < 2) {
+      errors.push(`Invalid line (expected email, password): "${line}"`);
+      continue;
+    }
+    const [email, password, ...nameParts] = parts;
+    const fullName = nameParts.join(', ').trim() || undefined;
+    students.push({ email, password, fullName });
+  }
+
+  return { students, errors };
 }
 
 export default function QuizDetail() {
@@ -33,12 +64,38 @@ export default function QuizDetail() {
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [deleteError, setDeleteError] = useState('');
 
+  // Roster state
+  const [enrollments, setEnrollments] = useState([]);
+  const [rosterLoading, setRosterLoading] = useState(true);
+  const [rosterError, setRosterError] = useState('');
+  const [rosterText, setRosterText] = useState('');
+  const [rosterAddLoading, setRosterAddLoading] = useState(false);
+  const [rosterAddError, setRosterAddError] = useState('');
+  // Plaintext passwords stored in component state for current session only.
+  // Keys are lowercased emails. Cleared on page reload — by design.
+  const [pendingPasswords, setPendingPasswords] = useState({});
+  const [copiedCredentials, setCopiedCredentials] = useState(false);
+
+  const loadEnrollments = useCallback(async () => {
+    try {
+      const { data } = await api.get(`/api/quizzes/${id}/enrollments`);
+      setEnrollments(data);
+      setRosterError('');
+    } catch {
+      setRosterError('Failed to load roster.');
+    } finally {
+      setRosterLoading(false);
+    }
+  }, [id]);
+
   useEffect(() => {
     api.get(`/api/quizzes/${id}`)
       .then(({ data }) => setQuiz(data))
       .catch(() => setFetchError('Failed to load quiz.'))
       .finally(() => setLoading(false));
-  }, [id]);
+
+    loadEnrollments();
+  }, [id, loadEnrollments]);
 
   async function handleStatusChange(newStatus) {
     if (statusLoading || quiz?.status === newStatus) return;
@@ -46,7 +103,6 @@ export default function QuizDetail() {
     setStatusLoading(true);
     try {
       const { data } = await api.patch(`/api/quizzes/${id}/status`, { status: newStatus });
-      // Merge returned fields; keep questions array from existing state.
       setQuiz((prev) => ({ ...prev, ...data }));
     } catch {
       setStatusError('Status update failed. Please try again.');
@@ -73,7 +129,81 @@ export default function QuizDetail() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Clipboard API unavailable — silently ignore.
+      // Clipboard API unavailable.
+    }
+  }
+
+  async function handleAddToRoster() {
+    const { students, errors } = parseRosterText(rosterText);
+
+    if (errors.length > 0) {
+      setRosterAddError(errors.join('\n'));
+      return;
+    }
+    if (students.length === 0) {
+      setRosterAddError('Please enter at least one student.');
+      return;
+    }
+
+    setRosterAddLoading(true);
+    setRosterAddError('');
+
+    try {
+      await api.post(`/api/quizzes/${id}/enrollments`, { students });
+
+      // Store plaintext passwords in component state for this session.
+      setPendingPasswords((prev) => {
+        const next = { ...prev };
+        for (const s of students) {
+          next[s.email.toLowerCase().trim()] = s.password;
+        }
+        return next;
+      });
+
+      setRosterText('');
+      await loadEnrollments();
+    } catch (err) {
+      const msg = err.response?.data?.error || 'Failed to add students.';
+      setRosterAddError(msg);
+    } finally {
+      setRosterAddLoading(false);
+    }
+  }
+
+  async function handleRemoveEnrollment(enrollment) {
+    if (!window.confirm(`Remove ${enrollment.student_email} from this exam?`)) return;
+
+    try {
+      await api.delete(`/api/quizzes/${id}/enrollments/${enrollment.id}`);
+      setEnrollments((prev) => prev.filter((e) => e.id !== enrollment.id));
+      setPendingPasswords((prev) => {
+        const next = { ...prev };
+        delete next[enrollment.student_email.toLowerCase()];
+        return next;
+      });
+    } catch {
+      setRosterError('Failed to remove student.');
+    }
+  }
+
+  async function handleCopyAllCredentials() {
+    const lines = enrollments.map((e) => {
+      const pw = pendingPasswords[e.student_email.toLowerCase()] || '••••••••';
+      return `${e.student_email} | ${pw}`;
+    });
+
+    const text = [
+      `${quiz?.title ?? 'Exam'} — Student Credentials`,
+      '─'.repeat(40),
+      ...lines,
+    ].join('\n');
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedCredentials(true);
+      setTimeout(() => setCopiedCredentials(false), 2000);
+    } catch {
+      // Clipboard API unavailable.
     }
   }
 
@@ -159,8 +289,8 @@ export default function QuizDetail() {
           )}
         </div>
 
-        {/* Student link — only visible when open */}
-        {quiz.status === 'open' && (
+        {/* Student link — locked: muted + preview note; open: active; closed: hidden */}
+        {quiz.status !== 'closed' && (
           <div className="border-t border-gray-100 px-6 py-5">
             <p className="mb-2.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
               Student link
@@ -170,15 +300,28 @@ export default function QuizDetail() {
                 type="text"
                 readOnly
                 value={studentLink}
-                className="min-w-0 flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 font-mono text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                className={`min-w-0 flex-1 rounded-lg border px-3 py-2 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 ${
+                  quiz.status === 'open'
+                    ? 'border-gray-200 bg-gray-50 text-gray-700'
+                    : 'border-gray-200 bg-gray-50 text-gray-400'
+                }`}
               />
               <button
                 onClick={() => handleCopy(studentLink)}
-                className="shrink-0 rounded-lg border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:border-indigo-400 hover:text-indigo-600"
+                className={`shrink-0 rounded-lg border px-3.5 py-2 text-sm font-medium shadow-sm transition-colors ${
+                  quiz.status === 'open'
+                    ? 'border-gray-300 bg-white text-gray-700 hover:border-indigo-400 hover:text-indigo-600'
+                    : 'border-gray-200 bg-gray-50 text-gray-400 hover:border-gray-300 hover:text-gray-600'
+                }`}
               >
                 {copied ? 'Copied!' : 'Copy link'}
               </button>
             </div>
+            {quiz.status === 'locked' && (
+              <p className="mt-2 text-xs text-gray-400">
+                Students who click this link will see "Quiz is not open yet" until you open it — safe to share in advance.
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -199,6 +342,107 @@ export default function QuizDetail() {
           </ol>
         ) : (
           <p className="text-sm text-gray-400">No questions.</p>
+        )}
+      </div>
+
+      {/* Roster card */}
+      <div className="mb-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+            Roster ({enrollments.length})
+          </h2>
+          {enrollments.length > 0 && (
+            <button
+              onClick={handleCopyAllCredentials}
+              className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:border-indigo-400 hover:text-indigo-600"
+            >
+              {copiedCredentials ? 'Copied!' : 'Copy all credentials'}
+            </button>
+          )}
+        </div>
+
+        {/* Bulk-add textarea */}
+        <div className="mb-4">
+          <textarea
+            value={rosterText}
+            onChange={(e) => setRosterText(e.target.value)}
+            rows={4}
+            placeholder={`Add students — one per line:\nstudent@uni.edu, Password123\nanother@uni.edu, Password456, Full Name`}
+            className="w-full resize-y rounded-lg border border-gray-300 px-3.5 py-2.5 font-mono text-sm text-gray-900 placeholder-gray-400 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+          />
+          {rosterAddError && (
+            <p className="mt-1.5 whitespace-pre-wrap text-xs font-medium text-red-600">{rosterAddError}</p>
+          )}
+          <div className="mt-2 flex items-center gap-3">
+            <button
+              onClick={handleAddToRoster}
+              disabled={rosterAddLoading || !rosterText.trim()}
+              className="rounded-lg border border-indigo-600 bg-indigo-600 px-4 py-1.5 text-sm font-semibold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-indigo-300 disabled:border-indigo-300"
+            >
+              {rosterAddLoading ? 'Adding…' : 'Add to Roster'}
+            </button>
+            <p className="text-xs text-gray-400">
+              Format: <span className="font-mono">email, password</span> or <span className="font-mono">email, password, Full Name</span>
+            </p>
+          </div>
+        </div>
+
+        {/* Roster table */}
+        {rosterLoading ? (
+          <p className="text-sm text-gray-400">Loading roster…</p>
+        ) : rosterError ? (
+          <p className="text-sm text-red-600">{rosterError}</p>
+        ) : enrollments.length === 0 ? (
+          <p className="text-sm text-gray-400">No students enrolled yet.</p>
+        ) : (
+          <>
+            <div className="overflow-x-auto rounded-lg border border-gray-200">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    <th className="px-4 py-2.5 text-left">Email</th>
+                    <th className="px-4 py-2.5 text-left">Full Name</th>
+                    <th className="px-4 py-2.5 text-left">Password</th>
+                    <th className="px-4 py-2.5 text-left">Status</th>
+                    <th className="px-4 py-2.5" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {enrollments.map((e) => {
+                    const pw = pendingPasswords[e.student_email.toLowerCase()];
+                    return (
+                      <tr key={e.id} className="hover:bg-gray-50/50">
+                        <td className="px-4 py-2.5 font-mono text-xs text-gray-800">{e.student_email}</td>
+                        <td className="px-4 py-2.5 text-gray-600">{e.full_name || <span className="text-gray-300">—</span>}</td>
+                        <td className="px-4 py-2.5 font-mono text-xs">
+                          {pw
+                            ? <span className="text-gray-800">{pw}</span>
+                            : <span className="tracking-widest text-gray-400">••••••••</span>
+                          }
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${SUB_STATUS_STYLES[e.submission_status]}`}>
+                            {SUB_STATUS_LABELS[e.submission_status]}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right">
+                          <button
+                            onClick={() => handleRemoveEnrollment(e)}
+                            className="text-xs font-medium text-gray-400 transition-colors hover:text-red-600"
+                          >
+                            Remove
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-2 text-xs text-gray-400">
+              Passwords are only visible during this session — they are hashed immediately on the server.
+            </p>
+          </>
         )}
       </div>
 

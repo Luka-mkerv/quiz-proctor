@@ -1,4 +1,5 @@
 const express = require("express");
+const bcrypt = require("bcrypt");
 const { pool } = require("../db/pool");
 const { requireAuth } = require("../middleware/requireAuth");
 
@@ -275,6 +276,155 @@ router.patch("/:id/status", async (req, res) => {
     return res.json(rows[0]);
   } catch (err) {
     console.error("Update quiz status error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// GET /api/quizzes/:id/enrollments
+// Returns all enrolled students for a quiz (never includes password_hash).
+// Includes submission_status derived from whether a linked submission exists.
+router.get("/:id/enrollments", async (req, res) => {
+  const quizId = Number(req.params.id);
+  if (!Number.isInteger(quizId)) {
+    return res.status(400).json({ error: "Invalid quiz id" });
+  }
+
+  try {
+    const ownerCheck = await pool.query(
+      "SELECT id FROM quizzes WHERE id = $1 AND lecturer_id = $2",
+      [quizId, req.lecturer.id]
+    );
+    if (!ownerCheck.rows[0]) {
+      return res.status(404).json({ error: "Quiz not found" });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT
+         e.id,
+         e.student_email,
+         e.full_name,
+         e.created_at,
+         CASE
+           WHEN s.submitted_at IS NOT NULL THEN 'submitted'
+           WHEN s.id IS NOT NULL          THEN 'in_progress'
+           ELSE                                'not_started'
+         END AS submission_status
+       FROM quiz_enrollments e
+       LEFT JOIN submissions s ON s.enrollment_id = e.id
+       WHERE e.quiz_id = $1
+       ORDER BY e.created_at ASC`,
+      [quizId]
+    );
+
+    return res.json(rows);
+  } catch (err) {
+    console.error("Get enrollments error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/quizzes/:id/enrollments
+// Body: { students: [{ email, password, fullName? }] }
+// Bulk upsert — re-adding an existing email updates the password instead of erroring,
+// so lecturers can correct a password by re-uploading the same row.
+router.post("/:id/enrollments", async (req, res) => {
+  const quizId = Number(req.params.id);
+  if (!Number.isInteger(quizId)) {
+    return res.status(400).json({ error: "Invalid quiz id" });
+  }
+
+  const { students } = req.body;
+  if (!Array.isArray(students) || students.length === 0) {
+    return res.status(400).json({ error: "students must be a non-empty array" });
+  }
+
+  for (const s of students) {
+    if (!s.email || !EMAIL_RE.test(s.email)) {
+      return res.status(400).json({ error: `Invalid email: ${s.email}` });
+    }
+    if (!s.password || typeof s.password !== "string" || !s.password.trim()) {
+      return res.status(400).json({ error: `password is required for ${s.email}` });
+    }
+  }
+
+  try {
+    const ownerCheck = await pool.query(
+      "SELECT id FROM quizzes WHERE id = $1 AND lecturer_id = $2",
+      [quizId, req.lecturer.id]
+    );
+    if (!ownerCheck.rows[0]) {
+      return res.status(404).json({ error: "Quiz not found" });
+    }
+
+    const hashed = await Promise.all(
+      students.map(async (s) => ({
+        email: s.email.toLowerCase().trim(),
+        passwordHash: await bcrypt.hash(s.password, 10),
+        fullName: s.fullName?.trim() || null,
+      }))
+    );
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const inserted = [];
+      for (const s of hashed) {
+        const { rows } = await client.query(
+          `INSERT INTO quiz_enrollments (quiz_id, student_email, password_hash, full_name)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (quiz_id, student_email)
+           DO UPDATE SET
+             password_hash = EXCLUDED.password_hash,
+             full_name     = EXCLUDED.full_name
+           RETURNING id, student_email, full_name, created_at`,
+          [quizId, s.email, s.passwordHash, s.fullName]
+        );
+        inserted.push(rows[0]);
+      }
+      await client.query("COMMIT");
+      return res.status(201).json(inserted);
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error("Add enrollments error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// DELETE /api/quizzes/:id/enrollments/:enrollmentId
+router.delete("/:id/enrollments/:enrollmentId", async (req, res) => {
+  const quizId = Number(req.params.id);
+  const enrollmentId = Number(req.params.enrollmentId);
+
+  if (!Number.isInteger(quizId) || !Number.isInteger(enrollmentId)) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+
+  try {
+    const ownerCheck = await pool.query(
+      "SELECT id FROM quizzes WHERE id = $1 AND lecturer_id = $2",
+      [quizId, req.lecturer.id]
+    );
+    if (!ownerCheck.rows[0]) {
+      return res.status(404).json({ error: "Quiz not found" });
+    }
+
+    const { rowCount } = await pool.query(
+      "DELETE FROM quiz_enrollments WHERE id = $1 AND quiz_id = $2",
+      [enrollmentId, quizId]
+    );
+    if (rowCount === 0) {
+      return res.status(404).json({ error: "Enrollment not found" });
+    }
+    return res.status(204).send();
+  } catch (err) {
+    console.error("Delete enrollment error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

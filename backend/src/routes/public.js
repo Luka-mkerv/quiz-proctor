@@ -1,7 +1,13 @@
 const express = require("express");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
 const { pool } = require("../db/pool");
+const { requireStudentAuth } = require("../middleware/requireStudentAuth");
 
 const router = express.Router();
+
+// Used for timing-safe comparison when no enrollment row exists.
+const DUMMY_HASH = "$2b$10$invalidsaltinvalidsaltinvalidsa.aaaaaaaaaaaaaaaaaaaaa";
 
 // GET /api/public/quizzes/:id
 router.get("/quizzes/:id", async (req, res) => {
@@ -42,7 +48,112 @@ router.get("/quizzes/:id", async (req, res) => {
   }
 });
 
+// POST /api/public/quizzes/:id/login
+// Body: { email, password }
+// Authenticates a student against the quiz's enrollment list and returns
+// a short-lived student JWT + the submission to use for this attempt.
+router.post("/quizzes/:id/login", async (req, res) => {
+  const quizId = Number(req.params.id);
+  if (!Number.isInteger(quizId)) {
+    return res.status(400).json({ error: "Invalid quiz id" });
+  }
+
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: "email and password are required" });
+  }
+
+  try {
+    const quizResult = await pool.query(
+      `SELECT id, status, duration_seconds FROM quizzes WHERE id = $1`,
+      [quizId]
+    );
+    const quiz = quizResult.rows[0];
+
+    if (!quiz) {
+      return res.status(404).json({ error: "Quiz not found" });
+    }
+    if (quiz.status !== "open") {
+      return res.status(403).json({ error: "This exam is not currently open" });
+    }
+
+    const enrollmentResult = await pool.query(
+      `SELECT id, student_email, password_hash, full_name
+       FROM quiz_enrollments
+       WHERE quiz_id = $1 AND LOWER(student_email) = LOWER($2)`,
+      [quizId, email.trim()]
+    );
+    const enrollment = enrollmentResult.rows[0];
+
+    // Always run bcrypt even when no enrollment found, to prevent timing attacks.
+    const hashToCheck = enrollment ? enrollment.password_hash : DUMMY_HASH;
+    const passwordMatches = await bcrypt.compare(password, hashToCheck);
+
+    if (!enrollment || !passwordMatches) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+
+    // Check for an existing submission linked to this enrollment.
+    const submissionResult = await pool.query(
+      `SELECT id, started_at, submitted_at FROM submissions WHERE enrollment_id = $1`,
+      [enrollment.id]
+    );
+    const existing = submissionResult.rows[0];
+
+    let submissionId;
+    let startedAt;
+
+    if (existing) {
+      if (existing.submitted_at !== null) {
+        return res.status(401).json({ error: "You have already submitted this exam" });
+      }
+      // Resume in-progress attempt (e.g. student refreshed the page).
+      submissionId = existing.id;
+      startedAt = existing.started_at;
+    } else {
+      // First login — create the submission.
+      // ON CONFLICT handles the edge case where a legacy test submission already
+      // used this email as student_name; in that case we link the enrollment.
+      const insertResult = await pool.query(
+        `INSERT INTO submissions (quiz_id, student_name, enrollment_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (quiz_id, student_name)
+         DO UPDATE SET enrollment_id = EXCLUDED.enrollment_id
+         WHERE submissions.enrollment_id IS NULL
+         RETURNING id, started_at`,
+        [quizId, enrollment.student_email, enrollment.id]
+      );
+      submissionId = insertResult.rows[0].id;
+      startedAt = insertResult.rows[0].started_at;
+    }
+
+    const token = jwt.sign(
+      {
+        sub: enrollment.id,
+        email: enrollment.student_email,
+        quizId,
+        submissionId,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "6h" }
+    );
+
+    return res.json({
+      token,
+      studentEmail: enrollment.student_email,
+      submissionId,
+      quizId,
+      durationSeconds: quiz.duration_seconds,
+      startedAt,
+    });
+  } catch (err) {
+    console.error("Student login error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // POST /api/public/quizzes/:id/start
+// Legacy name-based entry — kept for backwards compatibility with existing test flows.
 // Body: { studentName: string }
 router.post("/quizzes/:id/start", async (req, res) => {
   const quizId = Number(req.params.id);
@@ -116,10 +227,14 @@ router.post("/quizzes/:id/start", async (req, res) => {
 // POST /api/public/submissions/:submissionId/answers
 // Body: { questionId: number, answerText: string }
 // Autosave per question — safe to call repeatedly; upserts on the unique constraint.
-router.post("/submissions/:submissionId/answers", async (req, res) => {
+router.post("/submissions/:submissionId/answers", requireStudentAuth, async (req, res) => {
   const submissionId = Number(req.params.submissionId);
   if (!Number.isInteger(submissionId)) {
     return res.status(400).json({ error: "Invalid submission id" });
+  }
+
+  if (submissionId !== req.student.submissionId) {
+    return res.status(403).json({ error: "Forbidden" });
   }
 
   const { questionId, answerText } = req.body;
@@ -170,10 +285,14 @@ router.post("/submissions/:submissionId/answers", async (req, res) => {
 
 // POST /api/public/submissions/:submissionId/submit
 // Body: { autoSubmitted?: boolean }
-router.post("/submissions/:submissionId/submit", async (req, res) => {
+router.post("/submissions/:submissionId/submit", requireStudentAuth, async (req, res) => {
   const submissionId = Number(req.params.submissionId);
   if (!Number.isInteger(submissionId)) {
     return res.status(400).json({ error: "Invalid submission id" });
+  }
+
+  if (submissionId !== req.student.submissionId) {
+    return res.status(403).json({ error: "Forbidden" });
   }
 
   try {
