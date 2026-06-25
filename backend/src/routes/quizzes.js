@@ -22,6 +22,12 @@ router.post("/", async (req, res) => {
     if (!q.prompt || typeof q.prompt !== "string") {
       return res.status(400).json({ error: "each question requires a non-empty prompt" });
     }
+    if (q.max_points !== undefined) {
+      const mp = Number(q.max_points);
+      if (!isFinite(mp) || mp < 1 || mp > 100) {
+        return res.status(400).json({ error: "max_points must be between 1 and 100" });
+      }
+    }
   }
 
   const resolvedMode =
@@ -42,10 +48,10 @@ router.post("/", async (req, res) => {
     const insertedQuestions = [];
     for (let i = 0; i < questions.length; i++) {
       const { rows } = await client.query(
-        `INSERT INTO questions (quiz_id, prompt, question_order)
-         VALUES ($1, $2, $3)
-         RETURNING id, prompt, question_order`,
-        [quiz.id, questions[i].prompt.trim(), i]
+        `INSERT INTO questions (quiz_id, prompt, question_order, max_points)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, prompt, question_order, max_points`,
+        [quiz.id, questions[i].prompt.trim(), i, Number(questions[i].max_points) || 10]
       );
       insertedQuestions.push(rows[0]);
     }
@@ -129,7 +135,7 @@ router.get("/:id/results", async (req, res) => {
     const [questionsResult, submissionsResult, answersResult, violationsResult] =
       await Promise.all([
         pool.query(
-          `SELECT id, prompt, question_order
+          `SELECT id, prompt, question_order, max_points
            FROM questions
            WHERE quiz_id = $1
            ORDER BY question_order ASC`,
@@ -147,10 +153,13 @@ router.get("/:id/results", async (req, res) => {
         pool.query(
           `SELECT s.id AS submission_id,
                   q.id AS question_id,
-                  COALESCE(a.answer_text, '') AS answer_text
+                  COALESCE(a.answer_text, '') AS answer_text,
+                  g.points,
+                  g.notes
            FROM submissions s
            CROSS JOIN questions q
            LEFT JOIN answers a ON a.submission_id = s.id AND a.question_id = q.id
+           LEFT JOIN grades g ON g.submission_id = s.id AND g.question_id = q.id
            WHERE s.quiz_id = $1 AND q.quiz_id = $1
            ORDER BY s.id, q.question_order`,
           [quizId]
@@ -173,6 +182,8 @@ router.get("/:id/results", async (req, res) => {
       answersBySubmission.get(row.submission_id).push({
         question_id: row.question_id,
         answer_text: row.answer_text,
+        points: row.points,
+        notes: row.notes,
       });
     }
 
@@ -187,23 +198,107 @@ router.get("/:id/results", async (req, res) => {
       });
     }
 
+    const totalPossible = questionsResult.rows.reduce(
+      (sum, q) => sum + parseFloat(q.max_points),
+      0
+    );
+
     const submissions = submissionsResult.rows.map((s) => {
       const violations = violationsBySubmission.get(s.id) || [];
+      const answers = answersBySubmission.get(s.id) || [];
+      const gradedAnswers = answers.filter((a) => a.points !== null);
+      const total_points_awarded =
+        gradedAnswers.length > 0
+          ? gradedAnswers.reduce((sum, a) => sum + parseFloat(a.points), 0)
+          : null;
       return {
         id: s.id,
         student_name: s.student_name,
         started_at: s.started_at,
         submitted_at: s.submitted_at,
         auto_submitted: s.auto_submitted,
-        answers: answersBySubmission.get(s.id) || [],
+        answers,
         violations,
         violation_count: violations.length,
+        total_points_awarded,
+        total_points_possible: totalPossible,
       };
     });
 
     return res.json({ questions: questionsResult.rows, submissions });
   } catch (err) {
     console.error("Get quiz results error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/quizzes/:id/grades
+// Body: { submissionId, questionId, points, notes? }
+// Upserts a grade for one question on one submission.
+router.post("/:id/grades", async (req, res) => {
+  const quizId = Number(req.params.id);
+  if (!Number.isInteger(quizId)) {
+    return res.status(400).json({ error: "Invalid quiz id" });
+  }
+
+  const { submissionId, questionId, points, notes } = req.body;
+
+  if (!Number.isInteger(Number(submissionId)) || !Number.isInteger(Number(questionId))) {
+    return res.status(400).json({ error: "submissionId and questionId must be integers" });
+  }
+  if (typeof points !== "number" || !isFinite(points)) {
+    return res.status(400).json({ error: "points must be a finite number" });
+  }
+
+  const subId = Number(submissionId);
+  const qId = Number(questionId);
+
+  try {
+    const ownerCheck = await pool.query(
+      "SELECT id FROM quizzes WHERE id = $1 AND lecturer_id = $2",
+      [quizId, req.lecturer.id]
+    );
+    if (!ownerCheck.rows[0]) {
+      return res.status(404).json({ error: "Quiz not found" });
+    }
+
+    const submissionCheck = await pool.query(
+      "SELECT id FROM submissions WHERE id = $1 AND quiz_id = $2",
+      [subId, quizId]
+    );
+    if (!submissionCheck.rows[0]) {
+      return res.status(404).json({ error: "Submission not found" });
+    }
+
+    const questionCheck = await pool.query(
+      "SELECT max_points FROM questions WHERE id = $1 AND quiz_id = $2",
+      [qId, quizId]
+    );
+    if (!questionCheck.rows[0]) {
+      return res.status(404).json({ error: "Question not found" });
+    }
+
+    const maxPoints = parseFloat(questionCheck.rows[0].max_points);
+    if (points < 0 || points > maxPoints) {
+      return res.status(400).json({ error: `points must be between 0 and ${maxPoints}` });
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO grades (submission_id, question_id, points, notes, graded_by)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (submission_id, question_id)
+       DO UPDATE SET
+         points     = EXCLUDED.points,
+         notes      = EXCLUDED.notes,
+         graded_by  = EXCLUDED.graded_by,
+         graded_at  = now()
+       RETURNING id, submission_id, question_id, points, notes, graded_at`,
+      [subId, qId, points, notes || null, req.lecturer.id]
+    );
+
+    return res.json(rows[0]);
+  } catch (err) {
+    console.error("Grade submission error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

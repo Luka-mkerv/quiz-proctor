@@ -7,13 +7,13 @@ export default function QuizNew() {
   const [title, setTitle] = useState('');
   const [durationMinutes, setDurationMinutes] = useState('');
   const [monitoringMode, setMonitoringMode] = useState('lenient');
-  const [questions, setQuestions] = useState([{ prompt: '' }]);
+  const [questions, setQuestions] = useState([{ prompt: '', maxPoints: 10 }]);
   const [fieldErrors, setFieldErrors] = useState({});
   const [apiError, setApiError] = useState('');
   const [loading, setLoading] = useState(false);
 
   function addQuestion() {
-    setQuestions((prev) => [...prev, { prompt: '' }]);
+    setQuestions((prev) => [...prev, { prompt: '', maxPoints: 10 }]);
   }
 
   function removeQuestion(index) {
@@ -21,10 +21,10 @@ export default function QuizNew() {
     setQuestions((prev) => prev.filter((_, i) => i !== index));
   }
 
-  function updateQuestion(index, value) {
+  function updateQuestion(index, field, value) {
     setQuestions((prev) => {
       const next = [...prev];
-      next[index] = { prompt: value };
+      next[index] = { ...next[index], [field]: value };
       return next;
     });
   }
@@ -53,7 +53,10 @@ export default function QuizNew() {
       const payload = {
         title: title.trim(),
         monitoringMode,
-        questions: questions.map((q) => ({ prompt: q.prompt.trim() })),
+        questions: questions.map((q) => ({
+          prompt: q.prompt.trim(),
+          max_points: Number(q.maxPoints) || 10,
+        })),
       };
       const mins = parseFloat(durationMinutes);
       if (durationMinutes !== '' && mins > 0) {
@@ -173,10 +176,22 @@ export default function QuizNew() {
                   <input
                     type="text"
                     value={q.prompt}
-                    onChange={(e) => updateQuestion(i, e.target.value)}
+                    onChange={(e) => updateQuestion(i, 'prompt', e.target.value)}
                     placeholder={`Question ${i + 1}`}
                     className="flex-1 rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
                   />
+                  <div className="flex shrink-0 items-center gap-1">
+                    <input
+                      type="number"
+                      value={q.maxPoints}
+                      onChange={(e) => updateQuestion(i, 'maxPoints', e.target.value)}
+                      min={1}
+                      max={100}
+                      aria-label={`Points for question ${i + 1}`}
+                      className="w-16 rounded-lg border border-gray-300 px-2 py-2.5 text-center text-sm text-gray-900 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                    />
+                    <span className="text-xs text-gray-400">pts</span>
+                  </div>
                   <button
                     type="button"
                     onClick={() => removeQuestion(i)}
