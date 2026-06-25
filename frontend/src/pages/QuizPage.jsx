@@ -457,7 +457,7 @@ export default function QuizPage() {
   if (phase === 'loading') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50">
-        <p className="text-sm text-gray-400">Loading quiz…</p>
+        <p className="text-sm text-gray-500">Loading…</p>
       </div>
     );
   }
@@ -465,8 +465,8 @@ export default function QuizPage() {
   if (phase === 'error') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-        <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-8 text-center shadow-sm">
-          <p className="text-gray-700">{errorMsg}</p>
+        <div className="w-full max-w-md rounded-lg border border-gray-200 bg-white p-6 text-center">
+          <p className="text-sm text-gray-700">{errorMsg}</p>
         </div>
       </div>
     );
@@ -476,35 +476,32 @@ export default function QuizPage() {
     const isViolationSubmit = submitReasonRef.current === 'violation';
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-        <div className="w-full max-w-md rounded-2xl border bg-white p-10 text-center shadow-sm">
+        <div className="w-full max-w-md rounded-lg border border-gray-200 bg-white p-8 text-center">
           {isViolationSubmit ? (
             <>
-              <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-red-100 ring-8 ring-red-50">
-                <svg className="h-7 w-7 text-red-600" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100">
+                <svg className="h-6 w-6 text-red-600" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
                 </svg>
               </div>
-              <div className="mb-3 inline-flex items-center rounded-full border border-red-200 bg-red-50 px-3 py-1 text-xs font-semibold text-red-700">
-                Quiz auto-submitted
+              <div className="mb-3 inline-flex items-center rounded-full border border-red-200 bg-red-50 px-3 py-1 text-xs font-medium text-red-700">
+                Auto-submitted
               </div>
-              <h1 className="text-xl font-bold tracking-tight text-gray-900">Quiz submitted</h1>
-              <p className="mt-2 text-sm leading-relaxed text-gray-500">
-                Your quiz was automatically submitted because you did not return to the exam within the time limit. This quiz was set to strict monitoring mode.
-              </p>
-              <p className="mt-3 text-xs text-gray-400">
-                Your answers up to this point have been recorded.
+              <h1 className="text-lg font-semibold text-gray-900">Quiz submitted</h1>
+              <p className="mt-2 text-sm text-gray-600">
+                Your quiz was automatically submitted because you did not return within the time limit. Your answers up to this point have been recorded.
               </p>
             </>
           ) : (
             <>
-              <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-green-100 ring-8 ring-green-50">
-                <svg className="h-7 w-7 text-green-600" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-green-100">
+                <svg className="h-6 w-6 text-green-600" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
                 </svg>
               </div>
-              <h1 className="text-xl font-bold tracking-tight text-gray-900">All done</h1>
-              <p className="mt-2 text-sm leading-relaxed text-gray-500">
-                Your answers have been recorded. You may now close this window.
+              <h1 className="text-lg font-semibold text-gray-900">Submitted</h1>
+              <p className="mt-2 text-sm text-gray-600">
+                Your answers have been recorded. You may close this window.
               </p>
             </>
           )}
@@ -516,22 +513,22 @@ export default function QuizPage() {
   if (phase === 'entry') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-        <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-8 shadow-sm">
-          <h1 className="text-2xl font-bold tracking-tight text-gray-900">{quiz.title}</h1>
-          <p className="mt-1.5 text-sm text-gray-500">
+        <div className="w-full max-w-md rounded-lg border border-gray-200 bg-white p-6">
+          <h1 className="text-xl font-semibold text-gray-900">{quiz.title}</h1>
+          <p className="mt-1 text-sm text-gray-500">
             {quiz.questions.length} question{quiz.questions.length !== 1 ? 's' : ''}
             {quiz.durationSeconds
-              ? ` · ${Math.round(quiz.durationSeconds / 60)} minutes`
+              ? ` · ${Math.round(quiz.durationSeconds / 60)} min`
               : ' · No time limit'}
           </p>
 
           <form
             onSubmit={(e) => { e.preventDefault(); handleLogin(); }}
-            className="mt-7 space-y-4"
+            className="mt-6 space-y-4"
           >
             <div>
               <label htmlFor="studentEmail" className="mb-1.5 block text-sm font-medium text-gray-700">
-                Email address
+                Email
               </label>
               <input
                 id="studentEmail"
@@ -541,7 +538,7 @@ export default function QuizPage() {
                 placeholder="you@university.edu"
                 autoFocus
                 autoComplete="email"
-                className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
             </div>
 
@@ -554,33 +551,33 @@ export default function QuizPage() {
                 type="password"
                 value={studentPassword}
                 onChange={(e) => setStudentPassword(e.target.value)}
-                placeholder="Enter your exam password"
+                placeholder="••••••••"
                 autoComplete="current-password"
-                className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
             </div>
 
             {loginError && (
-              <p className="rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm font-medium text-red-700">
+              <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
                 {loginError}
-              </p>
+              </div>
             )}
 
-            <div className="flex items-start gap-2.5 rounded-lg bg-gray-50 px-3.5 py-3 text-xs leading-relaxed text-gray-500 ring-1 ring-inset ring-gray-200">
-              <svg className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
+            <div className="flex items-start gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2.5 text-xs text-gray-600">
+              <svg className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
               </svg>
               <span>
-                This exam is proctored. Your browser will enter fullscreen and activity is monitored for the duration.
+                Proctored exam — fullscreen required, activity monitored
               </span>
             </div>
 
             <button
               type="submit"
               disabled={loggingIn}
-              className="inline-flex w-full items-center justify-center rounded-lg bg-indigo-600 py-3 text-sm font-semibold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.99] focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-indigo-300"
+              className="w-full rounded-md bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {loggingIn ? 'Verifying…' : 'Enter Exam'}
+              {loggingIn ? 'Verifying…' : 'Enter exam'}
             </button>
           </form>
         </div>
@@ -593,99 +590,99 @@ export default function QuizPage() {
     <div className="min-h-screen bg-gray-50">
       {/* Strict-mode grace countdown overlay */}
       {graceCountdown !== null && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/80 backdrop-blur-sm">
-          <div className="mx-4 w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-2xl ring-1 ring-gray-900/10">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-red-100 ring-8 ring-red-50">
-              <svg className="h-7 w-7 text-red-600" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/80">
+          <div className="mx-4 w-full max-w-md rounded-lg bg-white p-8 text-center shadow-xl">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100">
+              <svg className="h-6 w-6 text-red-600" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
               </svg>
             </div>
-            <h2 className="text-lg font-bold tracking-tight text-gray-900">You've left the exam</h2>
-            <p className="mt-1.5 text-sm text-gray-500">
-              Return within <span className="font-semibold text-gray-800">6 seconds</span> or your quiz will be automatically submitted.
+            <h2 className="text-lg font-semibold text-gray-900">Return to exam</h2>
+            <p className="mt-1 text-sm text-gray-600">
+              Auto-submit in <span className="font-medium text-gray-900">6 seconds</span> if not returned
             </p>
             <div
-              className={`my-6 text-7xl font-bold tabular-nums transition-colors ${
+              className={`my-6 text-6xl font-bold tabular-nums ${
                 graceCountdown <= 2
                   ? 'text-red-600'
                   : graceCountdown <= 4
-                    ? 'text-amber-500'
-                    : 'text-gray-800'
+                    ? 'text-amber-600'
+                    : 'text-gray-900'
               }`}
             >
               {graceCountdown}
             </div>
             <button
               onClick={handleReturnToExam}
-              className="inline-flex w-full items-center justify-center rounded-lg bg-indigo-600 py-3 text-sm font-semibold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.99] focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2"
+              className="w-full rounded-md bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
             >
-              Return to Exam Now
+              Return now
             </button>
           </div>
         </div>
       )}
 
       {/* Sticky top bar */}
-      <div className="sticky top-0 z-10 border-b border-gray-200 bg-white/85 backdrop-blur supports-[backdrop-filter]:bg-white/70">
-        <div className="mx-auto flex max-w-2xl items-center justify-between gap-4 px-6 py-3.5">
-          <span className="truncate text-sm font-semibold tracking-tight text-gray-900">{quiz.title}</span>
+      <div className="sticky top-0 z-10 border-b border-gray-200 bg-white">
+        <div className="flex items-center justify-between gap-4 px-6 py-3">
+          <span className="min-w-0 truncate text-sm font-medium text-gray-900">{quiz.title}</span>
           <div className="flex shrink-0 items-center gap-3">
             {timeLeft !== null && (
               <span
-                className={`rounded-md px-2 py-0.5 font-mono text-sm font-semibold tabular-nums transition-colors ${
+                className={`rounded-md px-2 py-1 font-mono text-sm font-medium tabular-nums ${
                   timeLeft <= 60
                     ? 'bg-red-50 text-red-600'
                     : timeLeft <= 300
-                      ? 'bg-amber-50 text-amber-600'
+                      ? 'bg-amber-50 text-amber-700'
                       : 'text-gray-700'
                 }`}
               >
                 {formatTime(timeLeft)}
               </span>
             )}
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
-              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
-              Monitoring active
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-green-200 bg-green-50 px-2.5 py-1 text-xs font-medium text-green-700">
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" />
+              Monitored
             </span>
           </div>
         </div>
       </div>
 
       {socketWarning && (
-        <div className="border-b border-yellow-200 bg-yellow-50 px-6 py-2.5 text-center text-xs text-yellow-800">
+        <div className="border-b border-amber-200 bg-amber-50 px-6 py-2 text-center text-xs text-amber-800">
           {socketWarning}
         </div>
       )}
 
       {!inFullscreen && (
-        <div className="flex items-center justify-between gap-4 border-b border-amber-200 bg-amber-50 px-6 py-3">
-          <p className="text-sm font-medium text-amber-800">
-            You've exited fullscreen. This has been recorded.
+        <div className="flex items-center justify-between gap-4 border-b border-amber-200 bg-amber-50 px-6 py-2.5">
+          <p className="text-sm font-medium text-amber-900">
+            Fullscreen exited — this has been recorded
           </p>
           <button
             onClick={handleReenterFullscreen}
-            className="shrink-0 rounded-lg bg-amber-600 px-4 py-1.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-amber-700"
+            className="shrink-0 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-amber-700"
           >
-            Click to return
+            Return to fullscreen
           </button>
         </div>
       )}
 
       {/* Questions */}
-      <main className="mx-auto max-w-2xl space-y-8 px-6 py-12">
+      <main className="mx-auto max-w-3xl space-y-6 px-6 py-8">
         {quiz.questions.map((q, i) => (
-          <div key={q.id} className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-            <p className="mb-4 flex gap-3 text-[0.95rem] font-medium leading-relaxed text-gray-800">
-              <span className="shrink-0 font-semibold tabular-nums text-indigo-500">{i + 1}.</span>
-              <span>{q.prompt}</span>
-            </p>
+          <div key={q.id} className="rounded-lg border border-gray-200 bg-white p-6">
+            <div className="mb-4 flex gap-3">
+              <span className="shrink-0 font-medium tabular-nums text-indigo-600">{i + 1}</span>
+              <p className="text-sm text-gray-900">{q.prompt}</p>
+            </div>
             <textarea
-              rows={6}
+              rows={8}
               value={answers[q.id] ?? ''}
               onChange={(e) => handleAnswerChange(q.id, e.target.value)}
               onBlur={(e) => handleAnswerBlur(q.id, e.target.value)}
-              placeholder="Type your answer here…"
-              className="w-full resize-y rounded-lg border border-gray-300 px-3.5 py-3 text-sm leading-relaxed text-gray-900 placeholder-gray-400 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+              placeholder="Enter your answer…"
+              className="w-full resize-y rounded-md border border-gray-300 px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
           </div>
         ))}
@@ -693,12 +690,12 @@ export default function QuizPage() {
         <div className="flex flex-col items-start gap-2 border-t border-gray-200 pt-6">
           <button
             onClick={() => doSubmit(false)}
-            className="inline-flex items-center justify-center rounded-lg bg-indigo-600 px-8 py-3 text-sm font-semibold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2"
+            className="rounded-md bg-indigo-600 px-6 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
           >
-            Submit Quiz
+            Submit quiz
           </button>
-          <p className="text-xs text-gray-400">
-            Answers are saved automatically as you type. Submit when you're finished.
+          <p className="text-xs text-gray-500">
+            Answers saved automatically — submit when finished
           </p>
         </div>
       </main>

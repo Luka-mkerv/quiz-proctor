@@ -3,9 +3,9 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import api from '../lib/api.js';
 
 const STATUS_STYLES = {
-  locked: 'bg-gray-100 text-gray-600 ring-gray-500/20',
-  open:   'bg-green-50 text-green-700 ring-green-600/20',
-  closed: 'bg-blue-50 text-blue-700 ring-blue-600/20',
+  locked: 'bg-gray-100 text-gray-700 border-gray-200',
+  open:   'bg-green-50 text-green-700 border-green-200',
+  closed: 'bg-gray-100 text-gray-600 border-gray-200',
 };
 
 const STATUS_ACTIONS = [
@@ -15,9 +15,9 @@ const STATUS_ACTIONS = [
 ];
 
 const SUB_STATUS_STYLES = {
-  not_started: 'bg-gray-100 text-gray-500',
-  in_progress: 'bg-amber-50 text-amber-700',
-  submitted:   'bg-green-50 text-green-700',
+  not_started: 'bg-gray-100 text-gray-600 border-gray-200',
+  in_progress: 'bg-amber-50 text-amber-700 border-amber-200',
+  submitted:   'bg-green-50 text-green-700 border-green-200',
 };
 
 const SUB_STATUS_LABELS = {
@@ -209,7 +209,7 @@ export default function QuizDetail() {
 
   if (loading) {
     return (
-      <main className="mx-auto max-w-3xl px-6 py-10">
+      <main className="p-8">
         <p className="text-sm text-gray-500">Loading…</p>
       </main>
     );
@@ -217,12 +217,12 @@ export default function QuizDetail() {
 
   if (fetchError || !quiz) {
     return (
-      <main className="mx-auto max-w-3xl px-6 py-10">
-        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+      <main className="p-8">
+        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
           {fetchError || 'Quiz not found.'}
-        </p>
+        </div>
         <Link to="/dashboard" className="mt-4 inline-block text-sm font-medium text-gray-500 transition-colors hover:text-gray-900">
-          ← Back to quizzes
+          ← Back
         </Link>
       </main>
     );
@@ -231,31 +231,35 @@ export default function QuizDetail() {
   const studentLink = `${window.location.origin}/quiz/${id}`;
 
   return (
-    <main className="mx-auto max-w-3xl px-6 py-10">
+    <main className="p-8">
       <div className="mb-6">
         <Link to="/dashboard" className="text-sm font-medium text-gray-500 transition-colors hover:text-gray-900">
-          ← Back to quizzes
+          ← Back
         </Link>
       </div>
 
-      {/* Info + status card */}
-      <div className="mb-4 rounded-xl border border-gray-200 bg-white shadow-sm">
-        <div className="flex items-start justify-between gap-4 p-6">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight text-gray-900">{quiz.title}</h1>
-            <p className="mt-1 text-sm text-gray-500">{formatDuration(quiz.duration_seconds)}</p>
+      {/* Header card */}
+      <div className="mb-6 rounded-lg border border-gray-200 bg-white p-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-xl font-semibold text-gray-900">{quiz.title}</h1>
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-500">
+              <span>{formatDuration(quiz.duration_seconds)}</span>
+              <span className="text-gray-300">•</span>
+              <span>{quiz.questions?.length ?? 0} questions</span>
+            </div>
           </div>
-          <div className="flex shrink-0 flex-col items-end gap-1.5">
+          <div className="flex shrink-0 flex-col items-end gap-2">
             <span
-              className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium capitalize ring-1 ring-inset ${STATUS_STYLES[quiz.status] ?? 'bg-gray-100 text-gray-600 ring-gray-500/20'}`}
+              className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium capitalize ${STATUS_STYLES[quiz.status] ?? 'bg-gray-100 text-gray-600 border-gray-200'}`}
             >
               {quiz.status}
             </span>
             <span
-              className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset ${
+              className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${
                 quiz.monitoring_mode === 'strict'
-                  ? 'bg-red-50 text-red-700 ring-red-600/20'
-                  : 'bg-gray-100 text-gray-500 ring-gray-500/20'
+                  ? 'bg-red-50 text-red-700 border-red-200'
+                  : 'bg-gray-100 text-gray-600 border-gray-200'
               }`}
             >
               {quiz.monitoring_mode === 'strict' ? 'Strict' : 'Lenient'}
@@ -264,19 +268,19 @@ export default function QuizDetail() {
         </div>
 
         {/* Status controls */}
-        <div className="border-t border-gray-100 px-6 py-5">
-          <p className="mb-2.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
-            Change status
+        <div className="mt-5 border-t border-gray-200 pt-5">
+          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+            Quiz status
           </p>
-          <div className="inline-flex items-center gap-1 rounded-lg bg-gray-100 p-1">
+          <div className="inline-flex items-center gap-1 rounded-md border border-gray-200 bg-gray-50 p-1">
             {STATUS_ACTIONS.map(({ label, value }) => (
               <button
                 key={value}
                 onClick={() => handleStatusChange(value)}
                 disabled={statusLoading || quiz.status === value}
-                className={`rounded-md px-4 py-1.5 text-sm font-medium transition-all
+                className={`rounded px-3 py-1.5 text-sm font-medium transition-colors
                   ${quiz.status === value
-                    ? 'cursor-default bg-white text-indigo-600 shadow-sm'
+                    ? 'bg-white text-gray-900 shadow-sm'
                     : 'text-gray-600 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50'
                   }`}
               >
@@ -285,14 +289,14 @@ export default function QuizDetail() {
             ))}
           </div>
           {statusError && (
-            <p className="mt-2 text-xs font-medium text-red-600">{statusError}</p>
+            <p className="mt-2 text-xs text-red-600">{statusError}</p>
           )}
         </div>
 
         {/* Student link — locked: muted + preview note; open: active; closed: hidden */}
         {quiz.status !== 'closed' && (
-          <div className="border-t border-gray-100 px-6 py-5">
-            <p className="mb-2.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+          <div className="mt-5 border-t border-gray-200 pt-5">
+            <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">
               Student link
             </p>
             <div className="flex items-center gap-2">
@@ -300,7 +304,7 @@ export default function QuizDetail() {
                 type="text"
                 readOnly
                 value={studentLink}
-                className={`min-w-0 flex-1 rounded-lg border px-3 py-2 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 ${
+                className={`min-w-0 flex-1 rounded-md border px-3 py-2 font-mono text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
                   quiz.status === 'open'
                     ? 'border-gray-200 bg-gray-50 text-gray-700'
                     : 'border-gray-200 bg-gray-50 text-gray-400'
@@ -308,18 +312,14 @@ export default function QuizDetail() {
               />
               <button
                 onClick={() => handleCopy(studentLink)}
-                className={`shrink-0 rounded-lg border px-3.5 py-2 text-sm font-medium shadow-sm transition-colors ${
-                  quiz.status === 'open'
-                    ? 'border-gray-300 bg-white text-gray-700 hover:border-indigo-400 hover:text-indigo-600'
-                    : 'border-gray-200 bg-gray-50 text-gray-400 hover:border-gray-300 hover:text-gray-600'
-                }`}
+                className="shrink-0 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
               >
-                {copied ? 'Copied!' : 'Copy link'}
+                {copied ? 'Copied' : 'Copy'}
               </button>
             </div>
             {quiz.status === 'locked' && (
               <p className="mt-2 text-xs text-gray-400">
-                Students who click this link will see "Quiz is not open yet" until you open it — safe to share in advance.
+                Students who visit this link will see "Quiz is not open yet" — safe to share in advance
               </p>
             )}
           </div>
@@ -327,36 +327,36 @@ export default function QuizDetail() {
       </div>
 
       {/* Questions card */}
-      <div className="mb-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-        <h2 className="mb-4 text-xs font-semibold uppercase tracking-wide text-gray-500">
+      <div className="mb-6 rounded-lg border border-gray-200 bg-white p-6">
+        <h2 className="mb-3 text-xs font-medium uppercase tracking-wide text-gray-500">
           Questions ({quiz.questions?.length ?? 0})
         </h2>
         {quiz.questions?.length > 0 ? (
-          <ol className="space-y-3">
+          <ol className="space-y-2">
             {quiz.questions.map((q, i) => (
-              <li key={q.id} className="flex gap-3 text-sm text-gray-800">
-                <span className="shrink-0 font-semibold tabular-nums text-gray-400">{i + 1}.</span>
+              <li key={q.id} className="flex gap-3 text-sm text-gray-700">
+                <span className="shrink-0 font-medium tabular-nums text-gray-400">{i + 1}</span>
                 <span>{q.prompt}</span>
               </li>
             ))}
           </ol>
         ) : (
-          <p className="text-sm text-gray-400">No questions.</p>
+          <p className="text-sm text-gray-400">No questions</p>
         )}
       </div>
 
       {/* Roster card */}
-      <div className="mb-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+      <div className="mb-6 rounded-lg border border-gray-200 bg-white p-6">
         <div className="mb-4 flex items-center justify-between gap-4">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+          <h2 className="text-xs font-medium uppercase tracking-wide text-gray-500">
             Roster ({enrollments.length})
           </h2>
           {enrollments.length > 0 && (
             <button
               onClick={handleCopyAllCredentials}
-              className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:border-indigo-400 hover:text-indigo-600"
+              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
             >
-              {copiedCredentials ? 'Copied!' : 'Copy all credentials'}
+              {copiedCredentials ? 'Copied' : 'Copy all credentials'}
             </button>
           )}
         </div>
@@ -368,40 +368,40 @@ export default function QuizDetail() {
             onChange={(e) => setRosterText(e.target.value)}
             rows={4}
             placeholder={`Add students — one per line:\nstudent@uni.edu, Password123\nanother@uni.edu, Password456, Full Name`}
-            className="w-full resize-y rounded-lg border border-gray-300 px-3.5 py-2.5 font-mono text-sm text-gray-900 placeholder-gray-400 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+            className="w-full resize-y rounded-md border border-gray-300 px-3 py-2 font-mono text-sm text-gray-900 placeholder-gray-400 transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
           {rosterAddError && (
-            <p className="mt-1.5 whitespace-pre-wrap text-xs font-medium text-red-600">{rosterAddError}</p>
+            <p className="mt-1.5 whitespace-pre-wrap text-xs text-red-600">{rosterAddError}</p>
           )}
           <div className="mt-2 flex items-center gap-3">
             <button
               onClick={handleAddToRoster}
               disabled={rosterAddLoading || !rosterText.trim()}
-              className="rounded-lg border border-indigo-600 bg-indigo-600 px-4 py-1.5 text-sm font-semibold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-indigo-300 disabled:border-indigo-300"
+              className="rounded-md bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {rosterAddLoading ? 'Adding…' : 'Add to Roster'}
+              {rosterAddLoading ? 'Adding…' : 'Add to roster'}
             </button>
             <p className="text-xs text-gray-400">
-              Format: <span className="font-mono">email, password</span> or <span className="font-mono">email, password, Full Name</span>
+              <span className="font-mono">email, password</span> or <span className="font-mono">email, password, name</span>
             </p>
           </div>
         </div>
 
         {/* Roster table */}
         {rosterLoading ? (
-          <p className="text-sm text-gray-400">Loading roster…</p>
+          <p className="text-sm text-gray-400">Loading…</p>
         ) : rosterError ? (
           <p className="text-sm text-red-600">{rosterError}</p>
         ) : enrollments.length === 0 ? (
-          <p className="text-sm text-gray-400">No students enrolled yet.</p>
+          <p className="text-sm text-gray-400">No students enrolled</p>
         ) : (
           <>
-            <div className="overflow-x-auto rounded-lg border border-gray-200">
+            <div className="overflow-x-auto rounded-md border border-gray-200">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-gray-200 bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  <tr className="border-b border-gray-200 bg-gray-50 text-xs font-medium uppercase tracking-wide text-gray-500">
                     <th className="px-4 py-2.5 text-left">Email</th>
-                    <th className="px-4 py-2.5 text-left">Full Name</th>
+                    <th className="px-4 py-2.5 text-left">Name</th>
                     <th className="px-4 py-2.5 text-left">Password</th>
                     <th className="px-4 py-2.5 text-left">Status</th>
                     <th className="px-4 py-2.5" />
@@ -411,17 +411,17 @@ export default function QuizDetail() {
                   {enrollments.map((e) => {
                     const pw = pendingPasswords[e.student_email.toLowerCase()];
                     return (
-                      <tr key={e.id} className="hover:bg-gray-50/50">
-                        <td className="px-4 py-2.5 font-mono text-xs text-gray-800">{e.student_email}</td>
-                        <td className="px-4 py-2.5 text-gray-600">{e.full_name || <span className="text-gray-300">—</span>}</td>
+                      <tr key={e.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-2.5 font-mono text-xs text-gray-700">{e.student_email}</td>
+                        <td className="px-4 py-2.5 text-gray-700">{e.full_name || <span className="text-gray-300">—</span>}</td>
                         <td className="px-4 py-2.5 font-mono text-xs">
                           {pw
-                            ? <span className="text-gray-800">{pw}</span>
+                            ? <span className="text-gray-700">{pw}</span>
                             : <span className="tracking-widest text-gray-400">••••••••</span>
                           }
                         </td>
                         <td className="px-4 py-2.5">
-                          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${SUB_STATUS_STYLES[e.submission_status]}`}>
+                          <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${SUB_STATUS_STYLES[e.submission_status]}`}>
                             {SUB_STATUS_LABELS[e.submission_status]}
                           </span>
                         </td>
@@ -440,20 +440,20 @@ export default function QuizDetail() {
               </table>
             </div>
             <p className="mt-2 text-xs text-gray-400">
-              Passwords are only visible during this session — they are hashed immediately on the server.
+              Passwords only visible during this session — hashed immediately on server
             </p>
           </>
         )}
       </div>
 
       {/* Bottom actions */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-4">
         <Link
           to={`/dashboard/quizzes/${id}/monitor`}
-          className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-semibold shadow-sm transition-all active:scale-[0.98] ${
+          className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors ${
             quiz.status === 'open'
-              ? 'border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700'
-              : 'border-gray-300 bg-white text-gray-600 hover:border-gray-400 hover:text-gray-900'
+              ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+              : 'border border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
           }`}
         >
           <span
@@ -461,35 +461,35 @@ export default function QuizDetail() {
               quiz.status === 'open' ? 'animate-pulse bg-white' : 'bg-gray-400'
             }`}
           />
-          Live Monitor
+          Live monitor
         </Link>
         <Link
           to={`/dashboard/quizzes/${id}/results`}
-          className="text-sm font-semibold text-indigo-600 transition-colors hover:text-indigo-700"
+          className="text-sm font-medium text-indigo-600 transition-colors hover:text-indigo-700"
         >
           View results →
         </Link>
       </div>
 
       {/* Danger zone */}
-      <div className="mt-10 flex items-center justify-between rounded-xl border border-red-200 bg-red-50/50 px-6 py-4">
+      <div className="mt-8 flex items-center justify-between rounded-md border border-red-200 bg-red-50 px-6 py-4">
         <div>
-          <p className="text-sm font-semibold text-gray-900">Delete this quiz</p>
-          <p className="mt-0.5 text-xs text-gray-500">Permanently removes the quiz and all its data.</p>
+          <p className="text-sm font-medium text-gray-900">Delete quiz</p>
+          <p className="mt-0.5 text-xs text-gray-500">Permanently removes all data</p>
         </div>
         <button
           onClick={() => { setDeleteError(''); setDeleteConfirming(true); }}
-          className="shrink-0 rounded-lg border border-red-300 bg-white px-3.5 py-2 text-sm font-semibold text-red-600 shadow-sm transition-colors hover:bg-red-600 hover:text-white"
+          className="shrink-0 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700"
         >
-          Delete quiz
+          Delete
         </button>
       </div>
 
       {/* Delete confirmation modal */}
       {deleteConfirming && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/50 px-4 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl ring-1 ring-gray-900/5">
-            <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-full bg-red-100">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/50 px-4">
+          <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
+            <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-red-100">
               <svg className="h-5 w-5 text-red-600" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
               </svg>
@@ -497,34 +497,34 @@ export default function QuizDetail() {
             <h2 className="text-base font-semibold text-gray-900">
               Delete "{quiz.title}"?
             </h2>
-            <p className="mt-1 text-sm text-gray-600">
-              This permanently deletes the quiz and all associated data:
+            <p className="mt-2 text-sm text-gray-600">
+              This permanently deletes:
             </p>
-            <ul className="mt-3 mb-4 list-inside list-disc space-y-1 text-sm text-gray-600">
+            <ul className="mt-2 mb-4 list-inside list-disc space-y-1 text-sm text-gray-600">
               <li>All questions</li>
-              <li>All student submissions and answers</li>
+              <li>All student submissions</li>
               <li>All violation records</li>
             </ul>
-            <p className="mb-5 text-sm font-medium text-red-600">This cannot be undone.</p>
+            <p className="mb-5 text-sm font-medium text-red-600">This cannot be undone</p>
             {deleteError && (
-              <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
                 {deleteError}
-              </p>
+              </div>
             )}
             <div className="flex items-center justify-end gap-3">
               <button
                 onClick={() => setDeleteConfirming(false)}
                 disabled={deleteLoading}
-                className="rounded-lg px-3.5 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50"
+                className="rounded-md px-4 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 onClick={handleDeleteConfirm}
                 disabled={deleteLoading}
-                className="inline-flex items-center justify-center rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-all hover:bg-red-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-red-300"
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {deleteLoading ? 'Deleting…' : 'Yes, delete this quiz'}
+                {deleteLoading ? 'Deleting…' : 'Delete quiz'}
               </button>
             </div>
           </div>

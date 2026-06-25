@@ -128,7 +128,7 @@ export default function QuizMonitor() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <main className="mx-auto max-w-6xl px-6 py-8">
+      <main className="p-8">
         {/* Page header */}
         <div className="mb-6 flex items-start justify-between gap-4">
           <div>
@@ -136,24 +136,24 @@ export default function QuizMonitor() {
               to={`/dashboard/quizzes/${quizId}`}
               className="text-sm font-medium text-gray-500 transition-colors hover:text-gray-900"
             >
-              ← Back to quiz
+              ← Back
             </Link>
-            <h1 className="mt-2 text-2xl font-bold tracking-tight text-gray-900">Live Monitor</h1>
+            <h1 className="mt-2 text-xl font-semibold text-gray-900">Live Monitor</h1>
             {studentList.length > 0 && (
               <p className="mt-1 text-sm text-gray-500">
-                {studentList.length} student{studentList.length !== 1 ? 's' : ''} active
+                {studentList.length} student{studentList.length !== 1 ? 's' : ''} connected
               </p>
             )}
           </div>
           <div
-            className={`mt-1 inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium ring-1 ring-inset transition-colors ${
+            className={`mt-1 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
               socketOk && !joinError
-                ? 'bg-green-50 text-green-700 ring-green-600/20'
-                : 'bg-gray-100 text-gray-500 ring-gray-500/20'
+                ? 'border-green-200 bg-green-50 text-green-700'
+                : 'border-gray-200 bg-gray-100 text-gray-500'
             }`}
           >
             <span
-              className={`h-2 w-2 rounded-full ${
+              className={`h-1.5 w-1.5 rounded-full ${
                 socketOk && !joinError ? 'animate-pulse bg-green-500' : 'bg-gray-400'
               }`}
             />
@@ -163,28 +163,31 @@ export default function QuizMonitor() {
 
         {/* Join / auth error */}
         {joinError && (
-          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4">
-            <p className="text-sm font-semibold text-red-700">Failed to join monitoring session</p>
-            <p className="mt-0.5 text-sm text-red-600">{joinError}</p>
+          <div className="mb-6 rounded-md border border-red-200 bg-red-50 p-4">
+            <p className="text-sm font-medium text-red-700">Failed to join monitoring session</p>
+            <p className="mt-1 text-sm text-red-600">{joinError}</p>
             <p className="mt-2 text-xs text-red-500">
-              Make sure the quiz exists and you are the quiz owner.
+              Verify the quiz exists and you are the owner
             </p>
           </div>
         )}
 
         {/* Empty state */}
         {!joinError && studentList.length === 0 && (
-          <div className="rounded-xl border border-dashed border-gray-300 bg-white py-20 text-center shadow-sm">
-            <p className="text-sm font-medium text-gray-600">Waiting for students to join…</p>
-            <p className="mt-1 text-xs text-gray-400">
-              Students appear here when their first activity is detected.
+          <div className="flex flex-col items-center justify-center rounded-lg border border-gray-200 bg-white py-16 text-center">
+            <svg className="mb-3 h-12 w-12 text-gray-400" fill="none" stroke="currentColor" strokeWidth={1} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
+            </svg>
+            <p className="text-sm font-medium text-gray-900">Waiting for students</p>
+            <p className="mt-1 text-sm text-gray-500">
+              Students will appear when they join the exam
             </p>
           </div>
         )}
 
         {/* Chip grid */}
         {!joinError && studentList.length > 0 && (
-          <div className="flex flex-wrap content-start gap-2.5">
+          <div className="flex flex-wrap content-start gap-2">
             {studentList.map((s) => (
               <StudentChip
                 key={s.submissionId}
@@ -219,35 +222,27 @@ function StudentChip({ student, isSelected, onClick }) {
     <button
       onClick={onClick}
       className={[
-        // Layout & base
-        'relative inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5',
-        'cursor-pointer select-none border text-sm font-medium',
-        'transition-all duration-200 focus:outline-none',
-        // Permanent color: red once ever-flagged, neutral otherwise
+        'relative inline-flex w-44 items-center gap-2 rounded-md border px-3 py-2',
+        'cursor-pointer select-none text-sm font-medium',
+        'transition-all duration-150 focus:outline-none',
         flagged
-          ? 'border-red-700 bg-red-600 text-white hover:bg-red-700'
-          : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50',
-        // Flash on new violation: pop in scale + a bright halo ring that is
-        // distinct from both the steady red fill and the neutral chip.
+          ? 'border-red-600 bg-red-600 text-white hover:bg-red-700'
+          : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50',
         highlighted
-          ? 'z-10 scale-110 shadow-lg shadow-red-500/30 ring-2 ring-red-400 ring-offset-2'
-          : 'shadow-sm',
-        // Selected state: indigo ring (only when not flashing, to avoid clash)
+          ? 'z-10 scale-105 shadow-lg ring-2 ring-red-400 ring-offset-2'
+          : '',
         isSelected && !highlighted ? 'ring-2 ring-indigo-500 ring-offset-1' : '',
-        // Disconnected: fade the whole chip
         disconnected ? 'opacity-50' : '',
       ].join(' ')}
     >
-      {/* Small dot for disconnected indicator */}
       {disconnected && (
         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${flagged ? 'bg-white/70' : 'bg-gray-400'}`} />
       )}
 
-      <span className="max-w-[12rem] truncate">{studentName}</span>
+      <span className="min-w-0 flex-1 truncate text-left">{studentName}</span>
 
-      {/* Flag count badge — visible only when there are violations */}
       {count > 0 && (
-        <span className="inline-flex h-[1.25rem] min-w-[1.25rem] shrink-0 items-center justify-center rounded-full bg-white/25 px-1 text-xs font-bold leading-none text-white">
+        <span className="inline-flex h-5 min-w-[1.25rem] shrink-0 items-center justify-center rounded-full bg-white/25 px-1.5 text-xs font-bold tabular-nums text-white">
           {count}
         </span>
       )}
@@ -260,14 +255,14 @@ function StudentLiveStatus({ student }) {
   if (disconnected) {
     return (
       <span className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-500">
-        <span className="w-1.5 h-1.5 rounded-full bg-gray-400 inline-block shrink-0" />
+        <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-gray-400" />
         Disconnected{disconnectedAt && ` · ${fmtTime(disconnectedAt)}`}
       </span>
     );
   }
   return (
     <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-700">
-      <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse inline-block shrink-0" />
+      <span className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-green-500" />
       Active
     </span>
   );
