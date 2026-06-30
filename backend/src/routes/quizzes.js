@@ -1,7 +1,32 @@
 const express = require("express");
 const bcrypt = require("bcrypt");
+const fs = require("fs");
+const path = require("path");
+const multer = require("multer");
 const { pool } = require("../db/pool");
 const { requireAuth } = require("../middleware/requireAuth");
+const { restoreDatabase, dropDatabase, getTableCount } = require("../db/sqlServerOps");
+
+const UPLOAD_DIR = "/app/uploads/db";
+
+// Multer: save uploaded .bak files to the shared mssql_backups volume.
+// Filename is determined per-request (quiz_${id}.bak) so we configure it in
+// the route handler using a diskStorage factory.
+function buildUpload(quizId) {
+  return multer({
+    storage: multer.diskStorage({
+      destination: UPLOAD_DIR,
+      filename: (_req, _file, cb) => cb(null, `quiz_${quizId}.bak`),
+    }),
+    fileFilter: (_req, file, cb) => {
+      if (!file.originalname.toLowerCase().endsWith(".bak")) {
+        return cb(new Error("Only .bak files are accepted"));
+      }
+      cb(null, true);
+    },
+    limits: { fileSize: 10 * 1024 * 1024 * 1024 }, // 10 GB
+  });
+}
 
 const router = express.Router();
 
@@ -142,7 +167,7 @@ router.get("/:id/results", async (req, res) => {
           [quizId]
         ),
         pool.query(
-          `SELECT id, student_name, started_at, submitted_at, auto_submitted
+          `SELECT id, student_name, started_at, submitted_at, auto_submitted, socket_connected
            FROM submissions
            WHERE quiz_id = $1
            ORDER BY submitted_at ASC NULLS LAST`,
@@ -217,6 +242,7 @@ router.get("/:id/results", async (req, res) => {
         started_at: s.started_at,
         submitted_at: s.submitted_at,
         auto_submitted: s.auto_submitted,
+        socket_connected: s.socket_connected,
         answers,
         violations,
         violation_count: violations.length,
@@ -520,6 +546,159 @@ router.delete("/:id/enrollments/:enrollmentId", async (req, res) => {
     return res.status(204).send();
   } catch (err) {
     console.error("Delete enrollment error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/quizzes/:id/extensions/database
+// Returns the current database extension status for this quiz, or null.
+router.get("/:id/extensions/database", async (req, res) => {
+  const quizId = Number(req.params.id);
+  if (!Number.isInteger(quizId)) {
+    return res.status(400).json({ error: "Invalid quiz id" });
+  }
+
+  try {
+    const ownerCheck = await pool.query(
+      "SELECT id FROM quizzes WHERE id = $1 AND lecturer_id = $2",
+      [quizId, req.lecturer.id]
+    );
+    if (!ownerCheck.rows[0]) {
+      return res.status(404).json({ error: "Quiz not found" });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT id, status, original_filename, table_count, error_message, created_at
+       FROM quiz_db_extensions WHERE quiz_id = $1`,
+      [quizId]
+    );
+
+    return res.json(rows[0] ?? null);
+  } catch (err) {
+    console.error("Get extension error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/quizzes/:id/extensions/database
+// Accepts a multipart .bak upload, writes it to the shared volume, then kicks off
+// a RESTORE in the background. Responds immediately with { status: 'restoring' }.
+router.post("/:id/extensions/database", async (req, res) => {
+  const quizId = Number(req.params.id);
+  if (!Number.isInteger(quizId)) {
+    return res.status(400).json({ error: "Invalid quiz id" });
+  }
+
+  // Verify ownership before accepting the file.
+  const ownerCheck = await pool.query(
+    "SELECT id FROM quizzes WHERE id = $1 AND lecturer_id = $2",
+    [quizId, req.lecturer.id]
+  ).catch(() => ({ rows: [] }));
+  if (!ownerCheck.rows[0]) {
+    return res.status(404).json({ error: "Quiz not found" });
+  }
+
+  // Reject if an extension already exists (require DELETE first to replace).
+  const existing = await pool.query(
+    "SELECT id, status FROM quiz_db_extensions WHERE quiz_id = $1",
+    [quizId]
+  ).catch(() => ({ rows: [] }));
+  if (existing.rows[0]) {
+    return res.status(409).json({
+      error: "A database extension already exists for this quiz. Remove it before uploading a new one.",
+    });
+  }
+
+  // Now accept the file via multer.
+  const upload = buildUpload(quizId);
+  upload.single("file")(req, res, async (multerErr) => {
+    if (multerErr) {
+      return res.status(400).json({ error: multerErr.message });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    // Path inside the sqlserver container (shared volume mounted at different paths).
+    const sqlServerBackupPath = `/var/opt/mssql/backup/quiz_${quizId}.bak`;
+    const templateDbName = `quiz_${quizId}_template`;
+
+    try {
+      await pool.query(
+        `INSERT INTO quiz_db_extensions
+           (quiz_id, template_db_name, backup_file_path, original_filename, status)
+         VALUES ($1, $2, $3, $4, 'restoring')`,
+        [quizId, templateDbName, sqlServerBackupPath, req.file.originalname]
+      );
+    } catch (err) {
+      fs.unlink(req.file.path, () => {});
+      console.error("Insert extension row error:", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+
+    // Respond immediately — don't make the lecturer wait for the full restore.
+    res.json({ status: "restoring" });
+
+    // Background: restore the template DB then update status.
+    (async () => {
+      try {
+        await restoreDatabase(sqlServerBackupPath, templateDbName);
+        const tableCount = await getTableCount(templateDbName);
+        await pool.query(
+          "UPDATE quiz_db_extensions SET status = 'ready', table_count = $1 WHERE quiz_id = $2",
+          [tableCount, quizId]
+        );
+      } catch (err) {
+        console.error(`Template restore failed for quiz ${quizId}:`, err);
+        await pool.query(
+          "UPDATE quiz_db_extensions SET status = 'error', error_message = $1 WHERE quiz_id = $2",
+          [err.message ?? String(err), quizId]
+        ).catch(() => {});
+      }
+    })();
+  });
+});
+
+// DELETE /api/quizzes/:id/extensions/database
+// Drops the SQL Server template DB, removes the .bak file, deletes the pg row.
+router.delete("/:id/extensions/database", async (req, res) => {
+  const quizId = Number(req.params.id);
+  if (!Number.isInteger(quizId)) {
+    return res.status(400).json({ error: "Invalid quiz id" });
+  }
+
+  try {
+    const ownerCheck = await pool.query(
+      "SELECT id FROM quizzes WHERE id = $1 AND lecturer_id = $2",
+      [quizId, req.lecturer.id]
+    );
+    if (!ownerCheck.rows[0]) {
+      return res.status(404).json({ error: "Quiz not found" });
+    }
+
+    const extResult = await pool.query(
+      "SELECT template_db_name, backup_file_path FROM quiz_db_extensions WHERE quiz_id = $1",
+      [quizId]
+    );
+    if (!extResult.rows[0]) {
+      return res.status(404).json({ error: "No database extension found for this quiz" });
+    }
+
+    const { template_db_name, backup_file_path } = extResult.rows[0];
+
+    // Drop the SQL Server template DB (IF EXISTS handles partial-failure states).
+    await dropDatabase(template_db_name);
+
+    // Delete the backup file from the shared volume (backend-side path).
+    const localPath = path.join(UPLOAD_DIR, `quiz_${quizId}.bak`);
+    fs.unlink(localPath, () => {});
+
+    // Remove the pg row.
+    await pool.query("DELETE FROM quiz_db_extensions WHERE quiz_id = $1", [quizId]);
+
+    return res.status(204).send();
+  } catch (err) {
+    console.error("Delete extension error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

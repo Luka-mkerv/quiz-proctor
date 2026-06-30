@@ -72,6 +72,11 @@ function registerSocketHandlers(io) {
           submissionId: Number(submissionId),
           studentName: email,
         };
+        await pool.query(
+          'UPDATE submissions SET socket_connected = true WHERE id = $1',
+          [Number(submissionId)]
+        );
+
         console.log(`[student:join] ${socket.id} — joined room ${room} as ${email}`);
         socket.emit('student:joined', { quizId: Number(quizId) });
       } catch (err) {

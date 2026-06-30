@@ -3,6 +3,7 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { pool } = require("../db/pool");
 const { requireStudentAuth } = require("../middleware/requireStudentAuth");
+const { restoreDatabase, dropDatabase } = require("../db/sqlServerOps");
 
 const router = express.Router();
 
@@ -95,13 +96,14 @@ router.post("/quizzes/:id/login", async (req, res) => {
 
     // Check for an existing submission linked to this enrollment.
     const submissionResult = await pool.query(
-      `SELECT id, started_at, submitted_at FROM submissions WHERE enrollment_id = $1`,
+      `SELECT id, started_at, submitted_at, sandbox_db_name FROM submissions WHERE enrollment_id = $1`,
       [enrollment.id]
     );
     const existing = submissionResult.rows[0];
 
     let submissionId;
     let startedAt;
+    let sandboxDbName = null;
 
     if (existing) {
       if (existing.submitted_at !== null) {
@@ -110,6 +112,7 @@ router.post("/quizzes/:id/login", async (req, res) => {
       // Resume in-progress attempt (e.g. student refreshed the page).
       submissionId = existing.id;
       startedAt = existing.started_at;
+      sandboxDbName = existing.sandbox_db_name;
     } else {
       // First login — create the submission.
       // ON CONFLICT handles the edge case where a legacy test submission already
@@ -125,6 +128,36 @@ router.post("/quizzes/:id/login", async (req, res) => {
       );
       submissionId = insertResult.rows[0].id;
       startedAt = insertResult.rows[0].started_at;
+    }
+
+    // Check if this quiz has a ready database extension.
+    const extResult = await pool.query(
+      `SELECT backup_file_path, template_db_name
+       FROM quiz_db_extensions
+       WHERE quiz_id = $1 AND status = 'ready'`,
+      [quizId]
+    );
+    const ext = extResult.rows[0];
+
+    const hasDatabaseExtension = Boolean(ext);
+
+    if (ext && !sandboxDbName) {
+      // Provision a fresh sandbox for this student. Synchronous — ~270ms for small
+      // databases, a few seconds for large ones. Students wait for this before
+      // getting their token, which is acceptable given the UX context.
+      const newSandboxName = `sandbox_${submissionId}`;
+      try {
+        await restoreDatabase(ext.backup_file_path, newSandboxName);
+        await pool.query(
+          "UPDATE submissions SET sandbox_db_name = $1 WHERE id = $2",
+          [newSandboxName, submissionId]
+        );
+        sandboxDbName = newSandboxName;
+      } catch (err) {
+        console.error(`Sandbox provision failed for submission ${submissionId}:`, err);
+        // Non-fatal: student can still sit the exam without the SQL extension.
+        // A retry on page refresh will attempt provisioning again.
+      }
     }
 
     const token = jwt.sign(
@@ -145,6 +178,8 @@ router.post("/quizzes/:id/login", async (req, res) => {
       quizId,
       durationSeconds: quiz.duration_seconds,
       startedAt,
+      hasDatabaseExtension,
+      sandboxDbName,
     });
   } catch (err) {
     console.error("Student login error:", err);
@@ -297,7 +332,7 @@ router.post("/submissions/:submissionId/submit", requireStudentAuth, async (req,
 
   try {
     const result = await pool.query(
-      `SELECT s.id, s.submitted_at, q.duration_seconds, q.opened_at
+      `SELECT s.id, s.submitted_at, s.sandbox_db_name, q.duration_seconds, q.opened_at
        FROM submissions s
        JOIN quizzes q ON q.id = s.quiz_id
        WHERE s.id = $1`,
@@ -332,10 +367,18 @@ router.post("/submissions/:submissionId/submit", requireStudentAuth, async (req,
     );
 
     const updated = updateResult.rows[0];
-    return res.json({
+    res.json({
       submittedAt: updated.submitted_at,
       autoSubmitted: updated.auto_submitted,
     });
+
+    // Drop the student's sandbox after the response is sent — instant for SQL Server
+    // but we don't want any DROP latency in the student's "submitted" screen.
+    if (submission.sandbox_db_name) {
+      dropDatabase(submission.sandbox_db_name).catch((err) => {
+        console.error(`Failed to drop sandbox ${submission.sandbox_db_name}:`, err);
+      });
+    }
   } catch (err) {
     console.error("Submit error:", err);
     return res.status(500).json({ error: "Internal server error" });

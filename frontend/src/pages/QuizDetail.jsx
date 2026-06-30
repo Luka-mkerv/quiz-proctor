@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import api from '../lib/api.js';
 
@@ -64,6 +64,14 @@ export default function QuizDetail() {
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [deleteError, setDeleteError] = useState('');
 
+  // Database extension state
+  const [extension, setExtension] = useState(undefined); // undefined = loading, null = none
+  const [extFile, setExtFile] = useState(null);
+  const [extUploading, setExtUploading] = useState(false);
+  const [extError, setExtError] = useState('');
+  const [extRemoving, setExtRemoving] = useState(false);
+  const extPollRef = useRef(null);
+
   // Roster state
   const [enrollments, setEnrollments] = useState([]);
   const [rosterLoading, setRosterLoading] = useState(true);
@@ -88,6 +96,38 @@ export default function QuizDetail() {
     }
   }, [id]);
 
+  const loadExtension = useCallback(async () => {
+    try {
+      const { data } = await api.get(`/api/quizzes/${id}/extensions/database`);
+      setExtension(data); // null if none
+    } catch {
+      setExtension(null);
+    }
+  }, [id]);
+
+  // Poll extension status while restoring.
+  const startExtPoll = useCallback(() => {
+    if (extPollRef.current) return;
+    extPollRef.current = setInterval(async () => {
+      try {
+        const { data } = await api.get(`/api/quizzes/${id}/extensions/database`);
+        setExtension(data);
+        if (data?.status === 'ready' || data?.status === 'error' || !data) {
+          clearInterval(extPollRef.current);
+          extPollRef.current = null;
+        }
+      } catch {
+        // ignore transient errors — keep polling
+      }
+    }, 2000);
+  }, [id]);
+
+  useEffect(() => {
+    return () => {
+      if (extPollRef.current) clearInterval(extPollRef.current);
+    };
+  }, []);
+
   useEffect(() => {
     api.get(`/api/quizzes/${id}`)
       .then(({ data }) => setQuiz(data))
@@ -95,7 +135,8 @@ export default function QuizDetail() {
       .finally(() => setLoading(false));
 
     loadEnrollments();
-  }, [id, loadEnrollments]);
+    loadExtension();
+  }, [id, loadEnrollments, loadExtension]);
 
   async function handleStatusChange(newStatus) {
     if (statusLoading || quiz?.status === newStatus) return;
@@ -183,6 +224,40 @@ export default function QuizDetail() {
       });
     } catch {
       setRosterError('Failed to remove student.');
+    }
+  }
+
+  async function handleExtensionUpload() {
+    if (!extFile) return;
+    setExtUploading(true);
+    setExtError('');
+    try {
+      const formData = new FormData();
+      formData.append('file', extFile);
+      await api.post(`/api/quizzes/${id}/extensions/database`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setExtFile(null);
+      setExtension({ status: 'restoring' });
+      startExtPoll();
+    } catch (err) {
+      setExtError(err.response?.data?.error || 'Upload failed.');
+    } finally {
+      setExtUploading(false);
+    }
+  }
+
+  async function handleExtensionRemove() {
+    if (!window.confirm('Remove the database extension? This will drop the template database and delete the backup file.')) return;
+    setExtRemoving(true);
+    setExtError('');
+    try {
+      await api.delete(`/api/quizzes/${id}/extensions/database`);
+      setExtension(null);
+    } catch (err) {
+      setExtError(err.response?.data?.error || 'Failed to remove extension.');
+    } finally {
+      setExtRemoving(false);
     }
   }
 
@@ -443,6 +518,89 @@ export default function QuizDetail() {
               Passwords only visible during this session — hashed immediately on server
             </p>
           </>
+        )}
+      </div>
+
+      {/* Database Extension card */}
+      <div className="mb-6 rounded-lg border border-gray-200 bg-white p-6">
+        <h2 className="mb-4 text-xs font-medium uppercase tracking-wide text-gray-500">
+          Database Extension
+        </h2>
+
+        {extension === undefined && (
+          <p className="text-sm text-gray-400">Loading…</p>
+        )}
+
+        {extension === null && (
+          <div>
+            <p className="mb-3 text-sm text-gray-500">
+              Attach a SQL Server backup (.bak) so each student gets a fresh, writable copy of the database to query during the exam.
+            </p>
+            <div className="flex items-center gap-3">
+              <input
+                type="file"
+                accept=".bak"
+                onChange={(e) => setExtFile(e.target.files[0] ?? null)}
+                className="block text-sm text-gray-600 file:mr-3 file:rounded-md file:border file:border-gray-300 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-gray-700 file:transition-colors hover:file:bg-gray-50"
+              />
+              <button
+                onClick={handleExtensionUpload}
+                disabled={!extFile || extUploading}
+                className="shrink-0 rounded-md bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {extUploading ? 'Uploading…' : 'Upload'}
+              </button>
+            </div>
+            {extError && (
+              <p className="mt-2 text-xs text-red-600">{extError}</p>
+            )}
+          </div>
+        )}
+
+        {(extension?.status === 'uploading' || extension?.status === 'restoring') && (
+          <div className="flex items-center gap-2 text-sm text-gray-500">
+            <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+            Restoring database… this may take a moment
+          </div>
+        )}
+
+        {extension?.status === 'ready' && (
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-2 text-sm text-gray-700">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-green-100 text-green-600 text-xs font-bold">✓</span>
+              <span>
+                <span className="font-medium">{extension.original_filename}</span>
+                {extension.table_count !== null && (
+                  <span className="ml-1 text-gray-400">({extension.table_count} tables)</span>
+                )}
+              </span>
+            </div>
+            <button
+              onClick={handleExtensionRemove}
+              disabled={extRemoving}
+              className="shrink-0 rounded-md border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50"
+            >
+              {extRemoving ? 'Removing…' : 'Remove'}
+            </button>
+          </div>
+        )}
+
+        {extension?.status === 'error' && (
+          <div>
+            <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+              Restore failed: {extension.error_message || 'Unknown error'}
+            </div>
+            <button
+              onClick={handleExtensionRemove}
+              disabled={extRemoving}
+              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 disabled:opacity-50"
+            >
+              {extRemoving ? 'Removing…' : 'Clear and retry'}
+            </button>
+            {extError && (
+              <p className="mt-2 text-xs text-red-600">{extError}</p>
+            )}
+          </div>
         )}
       </div>
 

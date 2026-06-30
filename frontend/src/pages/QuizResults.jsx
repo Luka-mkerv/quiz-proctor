@@ -3,6 +3,25 @@ import { useParams, Link } from 'react-router-dom';
 import api from '../lib/api.js';
 import { ViolationPanel } from '../components/ViolationPanel.jsx';
 
+function MonitorStatus({ socket_connected, submitted_at }) {
+  if (socket_connected) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-gray-500">
+        <span className="text-green-600" aria-hidden="true">✓</span>
+        Monitored
+      </span>
+    );
+  }
+  if (submitted_at) {
+    return (
+      <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-800">
+        ⚠️ Bypassed exam interface
+      </span>
+    );
+  }
+  return <span className="text-gray-400">—</span>;
+}
+
 function SubmissionStatus({ submitted_at, auto_submitted }) {
   if (!submitted_at) {
     return (
@@ -291,6 +310,7 @@ export default function QuizResults() {
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Student</th>
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Submitted</th>
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Monitor</th>
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Score</th>
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Flags</th>
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Action</th>
@@ -310,6 +330,9 @@ export default function QuizResults() {
                   </td>
                   <td className="px-4 py-3">
                     <SubmissionStatus submitted_at={s.submitted_at} auto_submitted={s.auto_submitted} />
+                  </td>
+                  <td className="px-4 py-3">
+                    <MonitorStatus socket_connected={s.socket_connected} submitted_at={s.submitted_at} />
                   </td>
                   <td className="px-4 py-3 text-gray-700 tabular-nums">
                     <span className={s.total_points_awarded == null ? 'text-gray-400' : 'font-medium text-gray-900'}>
