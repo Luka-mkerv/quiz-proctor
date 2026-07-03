@@ -2,6 +2,29 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import api from '../lib/api.js';
 import { ViolationPanel } from '../components/ViolationPanel.jsx';
+import SqlResultsPanel from '../components/SqlResultsPanel.jsx';
+
+function ExecutionBadge({ lastExecutionSuccess }) {
+  if (lastExecutionSuccess === true) {
+    return (
+      <span className="inline-flex items-center rounded-full border border-green-200 bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700">
+        ✅ Ran successfully
+      </span>
+    );
+  }
+  if (lastExecutionSuccess === false) {
+    return (
+      <span className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700">
+        ❌ Had errors
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">
+      Not executed
+    </span>
+  );
+}
 
 function MonitorStatus({ socket_connected, submitted_at }) {
   if (socket_connected) {
@@ -93,6 +116,7 @@ function GradeCard({ question, answer, quizId, submissionId, onSaved }) {
           Q{question.question_order + 1}
         </h3>
         <span className="text-xs text-gray-400">{question.max_points} pts</span>
+        <ExecutionBadge lastExecutionSuccess={answer.last_execution_success} />
       </div>
       <p className="text-sm text-gray-700">{question.prompt}</p>
       <div>
@@ -104,6 +128,14 @@ function GradeCard({ question, answer, quizId, submissionId, onSaved }) {
           }
         </pre>
       </div>
+      {answer.last_execution_result && (
+        <div>
+          <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-gray-400">Last execution result</p>
+          <div className="rounded-md border border-gray-200 bg-gray-50 p-3">
+            <SqlResultsPanel results={answer.last_execution_result} compact />
+          </div>
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-3 border-t border-gray-200 pt-3">
         <div className="flex items-center gap-2">
           <label className="text-sm font-medium text-gray-700">Points</label>
@@ -182,6 +214,8 @@ function GradingPanel({ submission, questions, quizId, onGradeUpdated, onClose, 
           const answer = submission.answers.find((a) => a.question_id === q.id) || {
             question_id: q.id,
             answer_text: '',
+            last_execution_success: null,
+            last_execution_result: null,
             points: null,
             notes: null,
           };

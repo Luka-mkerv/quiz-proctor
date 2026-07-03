@@ -179,6 +179,8 @@ router.get("/:id/results", async (req, res) => {
           `SELECT s.id AS submission_id,
                   q.id AS question_id,
                   COALESCE(a.answer_text, '') AS answer_text,
+                  a.last_execution_success,
+                  a.last_execution_result,
                   g.points,
                   g.notes
            FROM submissions s
@@ -207,6 +209,8 @@ router.get("/:id/results", async (req, res) => {
       answersBySubmission.get(row.submission_id).push({
         question_id: row.question_id,
         answer_text: row.answer_text,
+        last_execution_success: row.last_execution_success,
+        last_execution_result: row.last_execution_result,
         points: row.points,
         notes: row.notes,
       });

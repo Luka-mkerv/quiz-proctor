@@ -2,6 +2,9 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import axios from 'axios';
+import CodeMirror from '@uiw/react-codemirror';
+import { sql as sqlLang } from '@codemirror/lang-sql';
+import SqlResultsPanel from '../components/SqlResultsPanel.jsx';
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 
@@ -38,6 +41,10 @@ export default function QuizPage() {
 
   // Active quiz UI
   const [answers, setAnswers] = useState({});
+  const [hasDbExtension, setHasDbExtension] = useState(false);
+  const [sqlResults, setSqlResults] = useState({});
+  const [sqlRunning, setSqlRunning] = useState({});
+  const [sqlRunError, setSqlRunError] = useState({});
   const [timeLeft, setTimeLeft] = useState(null);
   const [socketWarning, setSocketWarning] = useState('');
   const [inFullscreen, setInFullscreen] = useState(false);
@@ -57,6 +64,7 @@ export default function QuizPage() {
   const monitorCleanupRef = useRef(null);
   const submitReasonRef = useRef(null);
   const isJoinedRef = useRef(false);
+  const executedQuestionsRef = useRef(new Set());
 
   // --- Initial quiz fetch ---
   useEffect(() => {
@@ -84,6 +92,7 @@ export default function QuizPage() {
             ) {
               studentTokenRef.current = sess.token;
               submissionIdRef.current = sess.submissionId;
+              setHasDbExtension(Boolean(sess.hasDatabaseExtension));
 
               const init = {};
               data.questions.forEach((q) => { init[q.id] = ''; });
@@ -359,7 +368,9 @@ export default function QuizPage() {
         submissionId: data.submissionId,
         startedAt: data.startedAt,
         durationSeconds: data.durationSeconds,
+        hasDatabaseExtension: data.hasDatabaseExtension,
       }));
+      setHasDbExtension(Boolean(data.hasDatabaseExtension));
 
       try {
         await document.documentElement.requestFullscreen();
@@ -408,6 +419,33 @@ export default function QuizPage() {
     saveAnswer(questionId, value);
   }
 
+  function handleSqlChange(questionId, value) {
+    setAnswers((prev) => ({ ...prev, [questionId]: value }));
+  }
+
+  async function handleRunQuery(questionId) {
+    if (!submissionIdRef.current || submittedRef.current) return;
+    const sqlText = answers[questionId] || '';
+
+    setSqlRunning((prev) => ({ ...prev, [questionId]: true }));
+    setSqlRunError((prev) => ({ ...prev, [questionId]: '' }));
+
+    try {
+      const { data } = await publicApi.post(
+        '/api/public/student/execute',
+        { questionId, sql: sqlText },
+        { headers: { Authorization: `Bearer ${studentTokenRef.current}` } }
+      );
+      setSqlResults((prev) => ({ ...prev, [questionId]: data.results }));
+      executedQuestionsRef.current.add(questionId);
+    } catch (err) {
+      const msg = err.response?.data?.error || 'Could not run query. Please try again.';
+      setSqlRunError((prev) => ({ ...prev, [questionId]: msg }));
+    } finally {
+      setSqlRunning((prev) => ({ ...prev, [questionId]: false }));
+    }
+  }
+
   async function saveAnswer(questionId, answerText) {
     if (!submissionIdRef.current || submittedRef.current) return;
     try {
@@ -421,6 +459,26 @@ export default function QuizPage() {
     }
   }
 
+  function getUnrunSqlQuestions() {
+    if (!hasDbExtension || !quiz) return [];
+    return quiz.questions.filter((q) =>
+      !executedQuestionsRef.current.has(q.id) && (answers[q.id] || '').trim().length > 0
+    );
+  }
+
+  function handleManualSubmitClick() {
+    const unrun = getUnrunSqlQuestions();
+    if (unrun.length > 0) {
+      const labels = unrun
+        .map((q) => `Q${quiz.questions.findIndex((x) => x.id === q.id) + 1}`)
+        .join(', ');
+      if (!window.confirm(`You have unrun queries in ${labels}. Submit anyway?`)) {
+        return;
+      }
+    }
+    doSubmit(false);
+  }
+
   async function doSubmit(autoSubmitted) {
     if (submittedRef.current) return;
     submittedRef.current = true;
@@ -429,6 +487,25 @@ export default function QuizPage() {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (monitorCleanupRef.current) { monitorCleanupRef.current(); monitorCleanupRef.current = null; }
     if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
+
+    // Safety net: save any unrun SQL editor content as plain answer text so
+    // the lecturer can still read it, even though it was never executed.
+    const unrun = getUnrunSqlQuestions();
+    if (unrun.length > 0) {
+      try {
+        await Promise.all(unrun.map((q) =>
+          publicApi.post(
+            `/api/public/submissions/${submissionIdRef.current}/answers`,
+            { questionId: q.id, answerText: answers[q.id] },
+            { headers: { Authorization: `Bearer ${studentTokenRef.current}` } }
+          ).catch((err) => {
+            console.error(`Pre-submit save failed for question ${q.id}:`, err);
+          })
+        ));
+      } catch (err) {
+        console.error('Pre-submit SQL save failed:', err);
+      }
+    }
 
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
@@ -676,20 +753,58 @@ export default function QuizPage() {
               <span className="shrink-0 font-medium tabular-nums text-indigo-600">{i + 1}</span>
               <p className="text-sm text-gray-900">{q.prompt}</p>
             </div>
-            <textarea
-              rows={8}
-              value={answers[q.id] ?? ''}
-              onChange={(e) => handleAnswerChange(q.id, e.target.value)}
-              onBlur={(e) => handleAnswerBlur(q.id, e.target.value)}
-              placeholder="Enter your answer…"
-              className="w-full resize-y rounded-md border border-gray-300 px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
+            {hasDbExtension ? (
+              <div>
+                <div className="overflow-hidden rounded-md border border-gray-300">
+                  <CodeMirror
+                    value={answers[q.id] ?? ''}
+                    height="200px"
+                    extensions={[sqlLang()]}
+                    onChange={(value) => handleSqlChange(q.id, value)}
+                    placeholder="Write your SQL query here..."
+                  />
+                </div>
+                <div className="mt-2 flex items-center gap-3">
+                  <button
+                    onClick={() => handleRunQuery(q.id)}
+                    disabled={sqlRunning[q.id]}
+                    className="rounded-md bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {sqlRunning[q.id] ? 'Running…' : 'Run Query'}
+                  </button>
+                  <p className="text-xs text-gray-500">
+                    Your query is saved each time you run it.
+                  </p>
+                </div>
+
+                {sqlRunError[q.id] && (
+                  <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                    {sqlRunError[q.id]}
+                  </div>
+                )}
+
+                {sqlResults[q.id] && (
+                  <div className="mt-3 rounded-md border border-gray-200 bg-gray-50 p-3">
+                    <SqlResultsPanel results={sqlResults[q.id]} compact={false} />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <textarea
+                rows={8}
+                value={answers[q.id] ?? ''}
+                onChange={(e) => handleAnswerChange(q.id, e.target.value)}
+                onBlur={(e) => handleAnswerBlur(q.id, e.target.value)}
+                placeholder="Enter your answer…"
+                className="w-full resize-y rounded-md border border-gray-300 px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            )}
           </div>
         ))}
 
         <div className="flex flex-col items-start gap-2 border-t border-gray-200 pt-6">
           <button
-            onClick={() => doSubmit(false)}
+            onClick={handleManualSubmitClick}
             className="rounded-md bg-indigo-600 px-6 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
           >
             Submit quiz

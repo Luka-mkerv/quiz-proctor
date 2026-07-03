@@ -1,110 +1,155 @@
-# Quiz Proctor
+# Quiz Proctor — Quick Start Guide
 
-A self-hosted, live-monitored quiz/exam tool built for SQL midterms and quizzes — designed to deter casual cheating, give lecturers real-time visibility into student behavior during an exam, and keep a permanent audit trail of every submission.
-
-Built end-to-end: Postgres schema → Express/Socket.IO backend → React/Vite frontend, fully containerized for local development with Docker Compose.
-
----
-
-## What it does
-
-**For lecturers:**
-- Secure login (JWT-based, no public signup — accounts are seeded manually)
-- Create quizzes with any number of free-text questions, an optional time limit, and a choice of monitoring strictness
-- Lock, open, or close a quiz at will — students can only access it while it's open
-- Get a shareable link the moment a quiz opens (`/quiz/:id`), safe to post anywhere (Argus, email, etc.)
-- Watch a **live monitor** during the exam — every student shown as a compact chip, turning red the moment they're flagged, with a click-through history of exactly what happened and when
-- Review full **results** after the fact — every student's answers, submission status (on time / auto-submitted / in progress), and complete violation history
-- Delete a quiz (with a confirmation step) — cascades cleanly, removing all of its questions, submissions, answers, and violations
-
-**For students:**
-- No account needed — just a name and the link
-- Clean, distraction-free quiz page: enter fullscreen, answer questions, autosave as you type
-- Optional countdown timer, visible at all times
-- Manual submit, or automatic submit when time runs out
-- Can't edit or resubmit after finishing; can't start a second attempt under the same name once submitted
-
-**Two monitoring modes, set per quiz:**
-- **Lenient** — leaving the exam window (tab switch, alt-tab, exiting fullscreen) is logged as a flag, visible to the lecturer live and in results, but the student keeps going uninterrupted
-- **Strict** — the same actions trigger a 6-second on-screen countdown ("Return to Exam Now or you'll be auto-submitted"). Returning in time logs the flag and continues the exam; letting it expire ends the attempt immediately. This protects against accidental Escape-key taps while still being meaningfully strict against actual cheating attempts. A best-effort `beforeunload` handler also fires a final submit if the tab is closed outright.
+## Prerequisites (install once, already done)
+- Docker + Docker Compose
+- Node.js + pnpm
 
 ---
 
-## Architecture
+## Every time you want to run the project
 
-```
-quiz-proctor/
-├── docker-compose.yml        Postgres + backend, containerized for local dev
-├── backend/
-│   ├── src/
-│   │   ├── index.js          Express app + Socket.IO server
-│   │   ├── routes/
-│   │   │   ├── auth.js       Lecturer login (JWT)
-│   │   │   ├── quizzes.js    Authenticated quiz CRUD, results, delete
-│   │   │   └── public.js     Public student flow (no auth)
-│   │   ├── socket/index.js   Live violation broadcast (lecturer + student rooms)
-│   │   ├── middleware/requireAuth.js
-│   │   └── db/
-│   │       ├── pool.js
-│   │       ├── migrate.js    Plain-SQL migration runner
-│   │       ├── seedLecturer.js
-│   │       └── migrations/   001–006, applied in order
-│   └── Dockerfile
-└── frontend/
-    ├── src/
-    │   ├── pages/             Login, Dashboard, Create Quiz, Quiz Detail,
-    │   │                      Live Monitor, Results, Student Quiz page
-    │   └── lib/api.js         Axios client, auto-attaches JWT from localStorage
-    └── vite.config.js
-```
-
-**Stack:** Node/Express, PostgreSQL, Socket.IO, React + Vite + Tailwind CSS, Docker Compose.
-
-**Database:** `lecturers`, `quizzes` (status: locked/open/closed, monitoring_mode: lenient/strict, optional duration), `questions`, `submissions` (one per student per quiz, resumable on refresh), `answers` (autosaved per question), `violations` (typed: tab_switch, window_blur, fullscreen_exit, fullscreen_reenter, etc., timestamped).
-
-**Real-time layer:** Socket.IO rooms scoped per quiz (`quiz:{id}`). Students join and emit violations; lecturers join (with JWT) and receive live broadcasts. Disconnects are tracked separately from violations — a dropped connection isn't treated as cheating.
-
----
-
-## Setup (local development)
-
-Requires Docker, Node.js, and `pnpm` (or `npm`).
-
-**1. Start the backend (Postgres + Express + Socket.IO):**
+### 1. Start the backend services (Postgres + SQL Server + Node)
 ```bash
-docker compose up -d --build
-docker compose exec backend npm run migrate
-docker compose exec backend node src/db/seedLecturer.js "you@example.com" "yourpassword" "Your Name"
+cd ~/Projects/quiz/quiz-proctor
+docker compose up -d
 ```
 
-Verify it's up:
+Check everything is running:
+```bash
+docker compose ps
+```
+You should see 3 containers all showing `Up`:
+- `quiz-proctor-backend` (port 4000)
+- `quiz-proctor-db` (Postgres, port 5433)
+- `quiz-proctor-sqlserver` (SQL Server, port 1433)
+
+Verify backend is alive:
 ```bash
 curl http://localhost:4000/health
-# {"status":"ok"}
+# Should return: {"status":"ok"}
 ```
 
-**2. Start the frontend:**
+### 2. Start the frontend
 ```bash
-cd frontend
-pnpm install
+cd ~/Projects/quiz/quiz-proctor/frontend
 pnpm dev
 ```
-
-Open `http://localhost:3000`, log in with the credentials you seeded.
-
-**Important:** any time a new migration file is added (check `backend/src/db/migrations/`), run the migrate command again before testing — new DB columns/enum values won't exist until it's applied. This bit us once with a silently-failing enum value; don't skip it.
+Open `http://localhost:3000` in your browser.
 
 ---
 
-## Known limitations (by design, not oversights)
+## Lecturer login
+```
+Email:    you@uni.edu
+Password: yourpass
+```
 
-- **No browser-level proctoring is unbeatable.** A determined student with a second device can still cheat without triggering anything here. This system is a strong deterrent and audit trail, not an unbeatable lock — that's a hard limit of what any web app can enforce, not a gap specific to this build.
-- **Strict mode can't literally trap a browser tab.** Browsers explicitly prevent any website from blocking tab-close or fullscreen-exit — that's a deliberate security boundary, not something circumventable. Strict mode instead makes leaving carry an immediate, real consequence (the 6-second countdown) rather than preventing the action outright.
-- **Not load-tested at real exam scale yet** (20–50 concurrent students) — validated with several simultaneous test sessions, but a full-scale dry run before a real midterm is recommended.
-- **JWT_SECRET is still a placeholder** in local `.env` — must be replaced with a real random secret (`openssl rand -hex 32`) before any deployment beyond localhost.
+If you need to create or reset a lecturer account:
+```bash
+cd ~/Projects/quiz/quiz-proctor
+docker compose exec backend node src/db/seedLecturer.js "you@uni.edu" "yourpass" "Your Name"
+```
 
 ---
 
-## Status
+## If you added new migration files
+Run this before testing any new features — always:
+```bash
+docker compose exec backend npm run migrate
+```
+This is safe to run multiple times (skips already-applied migrations).
 
-Core product complete and manually verified end-to-end: auth, quiz lifecycle, student flow, live monitoring, results, strict/lenient modes, and quiz deletion. Next steps (when picked back up): production deployment (Railway/Render for backend, Vercel for frontend), a full concurrency dry-run, and optional further UI polish.
+---
+
+## Stopping everything
+```bash
+# Stop containers but keep data:
+docker compose down
+
+# Stop AND wipe all data (fresh start):
+docker compose down -v
+# Note: after this you'll need to re-run migrations and re-seed the lecturer
+```
+
+---
+
+## Checking logs if something breaks
+```bash
+# Backend logs (live):
+docker compose logs -f backend
+
+# All containers:
+docker compose logs -f
+
+# Last 50 lines of backend only:
+docker compose logs --tail 50 backend
+```
+
+---
+
+## If the backend seems broken after a code change
+```bash
+docker compose restart backend
+# Wait for "Backend listening on port 4000" in logs
+docker compose logs -f backend
+```
+
+---
+
+## SQL Server — useful commands
+```bash
+# Check what databases exist (including student sandboxes):
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P 'YOUR_SA_PASSWORD' -C \
+  -Q "SELECT name FROM sys.databases ORDER BY name;"
+
+# YOUR_SA_PASSWORD is in backend/.env as MSSQL_SA_PASSWORD
+```
+
+---
+
+## Project structure reminder
+```
+quiz-proctor/
+├── docker-compose.yml     ← all services defined here
+├── backend/               ← Node/Express/Socket.IO (runs in Docker)
+│   ├── src/
+│   │   ├── routes/        ← auth.js, quizzes.js, public.js
+│   │   ├── socket/        ← real-time violation tracking
+│   │   └── db/
+│   │       ├── migrations/ ← SQL migration files (001-011)
+│   │       ├── pool.js     ← Postgres connection
+│   │       ├── mssqlPool.js ← SQL Server connection
+│   │       └── seedLecturer.js
+└── frontend/              ← React/Vite/Tailwind (runs locally)
+    └── src/
+        ├── pages/         ← Login, Dashboard, QuizDetail, 
+        │                     QuizMonitor, QuizResults,
+        │                     QuizPage (student exam)
+        └── lib/api.js     ← axios client, auto-attaches JWT
+```
+
+---
+
+## Common issues
+
+**"service backend is not running"**
+→ You ran `docker compose` from the wrong folder. Always run from `~/Projects/quiz/quiz-proctor` (the project root, not inside `backend/`).
+
+**"Failed to load quizzes" in dashboard**
+→ Your JWT expired (8h lifespan). Just log out and log back in.
+
+**Frontend not updating after code change**
+→ Vite hot-reloads automatically. If it still looks wrong, hard-refresh the browser (Ctrl+Shift+R).
+
+**Port 5432 already in use**
+→ Another Postgres is running on your machine. Our container maps to port 5433 instead — this is already configured, no action needed.
+
+**SQL Server volume ownership error**
+→ If you ever wipe volumes and recreate them, run:
+```bash
+docker compose exec -u root sqlserver chown mssql:mssql /var/opt/mssql/backup
+```
+
+**pnpm: No package.json found**
+→ You're in the wrong directory. Frontend commands must be run from `~/Projects/quiz/quiz-proctor/frontend`, not the project root.

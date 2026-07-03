@@ -4,8 +4,24 @@ const jwt = require("jsonwebtoken");
 const { pool } = require("../db/pool");
 const { requireStudentAuth } = require("../middleware/requireStudentAuth");
 const { restoreDatabase, dropDatabase } = require("../db/sqlServerOps");
+const { executeSql } = require("../db/sqlExecutor");
 
 const router = express.Router();
+
+// Whole-word, case-insensitive matches for operations that must never run,
+// regardless of sandbox isolation (server-wide or filesystem impact).
+const FORBIDDEN_SQL_PATTERNS = [
+  /\bSHUTDOWN\b/i,
+  /\bxp_cmdshell\b/i,
+  /\bxp_reg\w*\b/i,
+  /\bRESTORE\s+DATABASE\b/i,
+  /\bDROP\s+DATABASE\b/i,
+  /\bBACKUP\s+DATABASE\b/i,
+];
+
+function findForbiddenSql(sqlText) {
+  return FORBIDDEN_SQL_PATTERNS.find((pattern) => pattern.test(sqlText));
+}
 
 // Used for timing-safe comparison when no enrollment row exists.
 const DUMMY_HASH = "$2b$10$invalidsaltinvalidsaltinvalidsa.aaaaaaaaaaaaaaaaaaaaa";
@@ -381,6 +397,81 @@ router.post("/submissions/:submissionId/submit", requireStudentAuth, async (req,
     }
   } catch (err) {
     console.error("Submit error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/student/execute
+// Body: { questionId: number, sql: string }
+// Executes student-submitted T-SQL against their personal sandbox database
+// and autosaves both the SQL text and the execution outcome.
+router.post("/student/execute", requireStudentAuth, async (req, res) => {
+  const { questionId, sql: sqlText } = req.body;
+  const qId = Number(questionId);
+
+  if (!Number.isInteger(qId) || qId <= 0) {
+    return res.status(400).json({ error: "questionId must be a positive integer" });
+  }
+  if (typeof sqlText !== "string" || !sqlText.trim()) {
+    return res.status(400).json({ error: "sql must be a non-empty string" });
+  }
+
+  const forbidden = findForbiddenSql(sqlText);
+  if (forbidden) {
+    return res.status(400).json({
+      error: `This query contains a disallowed operation (${forbidden.source.replace(/\\b|\\s\+/g, " ").trim()}).`,
+    });
+  }
+
+  try {
+    const submissionResult = await pool.query(
+      `SELECT id, sandbox_db_name, submitted_at, quiz_id FROM submissions WHERE id = $1`,
+      [req.student.submissionId]
+    );
+    const submission = submissionResult.rows[0];
+
+    if (!submission || submission.id !== req.student.submissionId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    if (submission.submitted_at !== null) {
+      return res.status(403).json({
+        error: "This submission has already been submitted. Queries cannot be run after submission.",
+      });
+    }
+    if (!submission.sandbox_db_name) {
+      return res.status(400).json({
+        error: "No database sandbox found for this submission. This quiz may not have a database extension.",
+      });
+    }
+    if (submission.sandbox_db_name !== `sandbox_${submission.id}`) {
+      return res.status(403).json({ error: "Sandbox mismatch for this submission" });
+    }
+
+    const questionCheck = await pool.query(
+      `SELECT id FROM questions WHERE id = $1 AND quiz_id = $2`,
+      [qId, submission.quiz_id]
+    );
+    if (!questionCheck.rows[0]) {
+      return res.status(400).json({ error: "Question does not belong to this quiz" });
+    }
+
+    const results = await executeSql(submission.sandbox_db_name, sqlText);
+    const success = results.every((r) => r.type !== "error");
+    const savedAt = new Date();
+
+    await pool.query(
+      `INSERT INTO answers (submission_id, question_id, answer_text, last_execution_success, last_execution_result)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (submission_id, question_id)
+       DO UPDATE SET answer_text = EXCLUDED.answer_text,
+                     last_execution_success = EXCLUDED.last_execution_success,
+                     last_execution_result = EXCLUDED.last_execution_result`,
+      [req.student.submissionId, qId, sqlText, success, JSON.stringify(results)]
+    );
+
+    return res.json({ results, savedAt });
+  } catch (err) {
+    console.error("Execute SQL error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
