@@ -65,16 +65,32 @@ async function executeSql(sandboxDbName, rawSql) {
     const batchSql = batches[i];
     const start = Date.now();
 
-    const request = pool.request();
+    // Each batch gets its own Transaction so USE and the batch SQL are sent
+    // as two separate wire batches on the SAME pinned connection. Sending
+    // them concatenated in one query() call (the previous approach) put USE
+    // ahead of the batch's own DDL statement, which SQL Server rejects for
+    // CREATE VIEW/TRIGGER/FUNCTION/PROCEDURE ("must be the first statement
+    // in a query batch"). pool.request() can't guarantee the same
+    // connection across two separate query() calls, hence the Transaction.
+    const transaction = new sql.Transaction(pool);
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      request.cancel();
-    }, QUERY_TIMEOUT_MS);
+    let timer;
+    let request;
 
     try {
-      const result = await request.query(`USE [${sandboxDbName}];\n${batchSql}`);
+      await transaction.begin();
+      await new sql.Request(transaction).query(`USE [${sandboxDbName}]`);
+
+      request = new sql.Request(transaction);
+      timer = setTimeout(() => {
+        timedOut = true;
+        request.cancel();
+      }, QUERY_TIMEOUT_MS);
+
+      const result = await request.query(batchSql);
       clearTimeout(timer);
+      await transaction.commit();
+
       const durationMs = Date.now() - start;
       const classified = classifyResult(result);
 
@@ -88,6 +104,12 @@ async function executeSql(sandboxDbName, rawSql) {
       clearTimeout(timer);
       const durationMs = Date.now() - start;
       const isTimeout = timedOut || err.code === "ETIMEOUT";
+
+      try {
+        await transaction.rollback();
+      } catch (_rollbackErr) {
+        // transaction may already be unusable (e.g. connection cancelled on timeout)
+      }
 
       const message = isTimeout
         ? "Query exceeded the 10-second time limit. Simplify your query or add a WHERE clause."
