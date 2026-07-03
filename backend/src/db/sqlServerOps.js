@@ -12,9 +12,15 @@ function esc(str) {
 async function restoreDatabase(backupPath, dbName) {
   const pool = await getMssqlPool();
 
+  // The pool hands out connections that may still have a `USE [dbName]`
+  // context left over from a prior request on the same connection (e.g. a
+  // student's own SQL execution against this exact sandbox name during
+  // reopen). RESTORE refuses to run against a database the current session
+  // is "in", so explicitly switch to master first regardless of whatever
+  // context the pooled connection happens to be carrying.
   const fileList = await pool
     .request()
-    .query(`RESTORE FILELISTONLY FROM DISK = N'${esc(backupPath)}'`);
+    .query(`USE master; RESTORE FILELISTONLY FROM DISK = N'${esc(backupPath)}'`);
 
   const files = fileList.recordset;
   const dataFiles = files.filter((f) => f.Type === "D");
@@ -32,6 +38,7 @@ async function restoreDatabase(backupPath, dbName) {
   ];
 
   await pool.request().query(`
+    USE master;
     RESTORE DATABASE [${dbName}]
     FROM DISK = N'${esc(backupPath)}'
     WITH ${moveClauses.join(",\n         ")},
@@ -41,7 +48,7 @@ async function restoreDatabase(backupPath, dbName) {
 
 async function dropDatabase(dbName) {
   const pool = await getMssqlPool();
-  await pool.request().query(`DROP DATABASE IF EXISTS [${dbName}]`);
+  await pool.request().query(`USE master; DROP DATABASE IF EXISTS [${dbName}]`);
 }
 
 async function getTableCount(dbName) {

@@ -250,6 +250,9 @@ export default function QuizResults() {
   const [error, setError] = useState('');
   const [gradingIdx, setGradingIdx] = useState(null);
   const [violationId, setViolationId] = useState(null);
+  const [reopeningId, setReopeningId] = useState(null);
+  const [reopenError, setReopenError] = useState({});
+  const [reopenSuccessId, setReopenSuccessId] = useState(null);
 
   useEffect(() => {
     api.get(`/api/quizzes/${id}/results`)
@@ -276,6 +279,36 @@ export default function QuizResults() {
     }));
   }
 
+  async function handleReopen(submission) {
+    if (!window.confirm(
+      `Reopen ${submission.student_name}'s attempt? Their saved answers will be preserved but their database sandbox will be reset. They will need to log back in to continue.`
+    )) {
+      return;
+    }
+
+    setReopeningId(submission.id);
+    setReopenError((prev) => ({ ...prev, [submission.id]: '' }));
+
+    try {
+      await api.post(`/api/quizzes/${id}/submissions/${submission.id}/reopen`);
+      setResults((prev) => ({
+        ...prev,
+        submissions: prev.submissions.map((s) =>
+          s.id === submission.id ? { ...s, submitted_at: null, auto_submitted: false } : s
+        ),
+      }));
+      setReopenSuccessId(submission.id);
+      setTimeout(() => {
+        setReopenSuccessId((cur) => (cur === submission.id ? null : cur));
+      }, 3000);
+    } catch (err) {
+      const msg = err.response?.data?.error || 'Failed to reopen submission.';
+      setReopenError((prev) => ({ ...prev, [submission.id]: msg }));
+    } finally {
+      setReopeningId(null);
+    }
+  }
+
   if (loading) {
     return (
       <main className="p-8">
@@ -297,7 +330,8 @@ export default function QuizResults() {
     );
   }
 
-  const { questions, submissions } = results;
+  const { questions, submissions, quizStatus } = results;
+  const canReopen = (s) => s.submitted_at !== null && (quizStatus === 'open' || quizStatus === 'locked');
 
   const gradedCount = submissions.filter((s) =>
     questions.length > 0 && s.answers.every((a) => a.points !== null)
@@ -364,6 +398,23 @@ export default function QuizResults() {
                   </td>
                   <td className="px-4 py-3">
                     <SubmissionStatus submitted_at={s.submitted_at} auto_submitted={s.auto_submitted} />
+                    {canReopen(s) && (
+                      <div className="mt-1.5">
+                        <button
+                          onClick={() => handleReopen(s)}
+                          disabled={reopeningId === s.id}
+                          className="inline-flex items-center gap-1 rounded-md border border-gray-300 bg-white px-2 py-0.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {reopeningId === s.id ? 'Reopening…' : '↩ Reopen'}
+                        </button>
+                        {reopenError[s.id] && (
+                          <p className="mt-1 max-w-[10rem] text-xs text-red-600">{reopenError[s.id]}</p>
+                        )}
+                      </div>
+                    )}
+                    {reopenSuccessId === s.id && (
+                      <p className="mt-1 max-w-[10rem] text-xs text-green-600">Reopened — student can now log back in</p>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <MonitorStatus socket_connected={s.socket_connected} submitted_at={s.submitted_at} />

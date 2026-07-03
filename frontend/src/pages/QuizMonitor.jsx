@@ -91,6 +91,24 @@ export default function QuizMonitor() {
       }, 2000);
     });
 
+    socket.on('submission:reopened', ({ submissionId, studentEmail }) => {
+      // The student hasn't reconnected yet — they still need to log back in
+      // — so this is a neutral "pending" state, distinct from both the
+      // green "Active" state and the gray "Disconnected" state.
+      setStudents((prev) => ({
+        ...prev,
+        [submissionId]: {
+          submissionId,
+          studentName: studentEmail,
+          violations: [],
+          highlighted: false,
+          ...(prev[submissionId] ?? {}),
+          disconnected: false,
+          reconnecting: true,
+        },
+      }));
+    });
+
     socket.on('student:disconnected', ({ submissionId, studentName, disconnectedAt }) => {
       setStudents((prev) => ({
         ...prev,
@@ -214,7 +232,7 @@ export default function QuizMonitor() {
 }
 
 function StudentChip({ student, isSelected, onClick }) {
-  const { studentName, violations, disconnected, highlighted } = student;
+  const { studentName, violations, disconnected, reconnecting, highlighted } = student;
   const count = violations.length;
   const flagged = count > 0;
 
@@ -238,6 +256,9 @@ function StudentChip({ student, isSelected, onClick }) {
       {disconnected && (
         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${flagged ? 'bg-white/70' : 'bg-gray-400'}`} />
       )}
+      {!disconnected && reconnecting && (
+        <span className={`h-1.5 w-1.5 shrink-0 animate-pulse rounded-full ${flagged ? 'bg-white/70' : 'bg-amber-400'}`} />
+      )}
 
       <span className="min-w-0 flex-1 truncate text-left">{studentName}</span>
 
@@ -251,12 +272,20 @@ function StudentChip({ student, isSelected, onClick }) {
 }
 
 function StudentLiveStatus({ student }) {
-  const { disconnected, disconnectedAt } = student;
+  const { disconnected, disconnectedAt, reconnecting } = student;
   if (disconnected) {
     return (
       <span className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-500">
         <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-gray-400" />
         Disconnected{disconnectedAt && ` · ${fmtTime(disconnectedAt)}`}
+      </span>
+    );
+  }
+  if (reconnecting) {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700">
+        <span className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500" />
+        Reopened — waiting for student to log back in
       </span>
     );
   }

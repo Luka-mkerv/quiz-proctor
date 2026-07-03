@@ -33,6 +33,11 @@ const io = new Server(server, {
   cors: { origin: allowedOrigins },
 });
 
+// Route handlers (quiz status changes, timer-expiry auto-close) need to emit
+// to socket rooms — expose the io instance via app.locals rather than a
+// module-level singleton, since it's already scoped per-request via req.app.
+app.set("io", io);
+
 registerSocketHandlers(io);
 
 const PORT = process.env.PORT || 4000;

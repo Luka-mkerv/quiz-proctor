@@ -9,9 +9,9 @@ const STATUS_STYLES = {
 };
 
 const STATUS_ACTIONS = [
-  { label: 'Lock',  value: 'locked' },
-  { label: 'Open',  value: 'open'   },
-  { label: 'Close', value: 'closed' },
+  { label: 'Lock',  value: 'locked', description: 'Lock — pauses the exam timer for all active students' },
+  { label: 'Open',  value: 'open',   description: 'Open — starts or resumes the exam; a paused timer resumes without losing the paused time' },
+  { label: 'Close', value: 'closed', description: 'Close — ends the exam and auto-submits all active students' },
 ];
 
 const SUB_STATUS_STYLES = {
@@ -348,11 +348,12 @@ export default function QuizDetail() {
             Quiz status
           </p>
           <div className="inline-flex items-center gap-1 rounded-md border border-gray-200 bg-gray-50 p-1">
-            {STATUS_ACTIONS.map(({ label, value }) => (
+            {STATUS_ACTIONS.map(({ label, value, description }) => (
               <button
                 key={value}
                 onClick={() => handleStatusChange(value)}
                 disabled={statusLoading || quiz.status === value}
+                title={description}
                 className={`rounded px-3 py-1.5 text-sm font-medium transition-colors
                   ${quiz.status === value
                     ? 'bg-white text-gray-900 shadow-sm'

@@ -25,6 +25,25 @@ function decodeJwtPayload(token) {
   }
 }
 
+// Shared between session-restore and a fresh login — a student who was
+// reopened by a lecturer logs back in via the form (submit clears
+// sessionStorage), not via session-restore, so both paths need to repopulate
+// previously saved answers the same way.
+function mergeAnswersIntoState(questions, answers) {
+  const init = {};
+  questions.forEach((q) => { init[q.id] = ''; });
+  const resultsInit = {};
+  const executedSet = new Set();
+  for (const a of answers) {
+    init[a.questionId] = a.answerText;
+    if (a.lastExecutionResult) {
+      resultsInit[a.questionId] = a.lastExecutionResult;
+      executedSet.add(a.questionId);
+    }
+  }
+  return { init, resultsInit, executedSet };
+}
+
 export default function QuizPage() {
   const { id: quizId } = useParams();
 
@@ -32,6 +51,7 @@ export default function QuizPage() {
   const [phase, setPhase] = useState('loading');
   const [quiz, setQuiz] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
+  const [loadingLabel, setLoadingLabel] = useState('Loading…');
 
   // Login form
   const [studentEmail, setStudentEmail] = useState('');
@@ -49,6 +69,7 @@ export default function QuizPage() {
   const [socketWarning, setSocketWarning] = useState('');
   const [inFullscreen, setInFullscreen] = useState(false);
   const [graceCountdown, setGraceCountdown] = useState(null);
+  const [currentlyPaused, setCurrentlyPaused] = useState(false);
 
   // Mutable state used inside closures.
   const studentTokenRef = useRef(null);
@@ -66,6 +87,14 @@ export default function QuizPage() {
   const isJoinedRef = useRef(false);
   const executedQuestionsRef = useRef(new Set());
 
+  // Timer fields, mirrored into refs so the tick() closure (running inside a
+  // setInterval set up once) always reads the latest values — pause/resume
+  // socket events update these without needing to restart the interval.
+  const openedAtRef = useRef(null);
+  const totalPausedSecondsRef = useRef(0);
+  const pausedAtRef = useRef(null);
+  const durationSecondsRef = useRef(null);
+
   // --- Initial quiz fetch ---
   useEffect(() => {
     // Strict Mode in development double-invokes effects (run → cleanup → run).
@@ -74,41 +103,85 @@ export default function QuizPage() {
     // second run.
     let canceled = false;
 
-    publicApi.get(`/api/public/quizzes/${quizId}`)
-      .then(({ data }) => {
+    // Try to restore an in-progress session from this tab. Read synchronously
+    // up front (not inside the quiz-fetch .then()) so the saved-answers fetch
+    // can run in parallel with the quiz fetch rather than after it.
+    let sess = null;
+    const sessionStr = sessionStorage.getItem(`studentSession_${quizId}`);
+    if (sessionStr) {
+      try {
+        const parsed = JSON.parse(sessionStr);
+        const payload = decodeJwtPayload(parsed.token);
+        if (
+          payload &&
+          String(payload.quizId) === String(quizId) &&
+          payload.exp * 1000 > Date.now()
+        ) {
+          sess = parsed;
+        } else {
+          sessionStorage.removeItem(`studentSession_${quizId}`);
+        }
+      } catch {
+        sessionStorage.removeItem(`studentSession_${quizId}`);
+      }
+    }
+
+    if (sess) setLoadingLabel('Restoring your exam session…');
+
+    const quizPromise = publicApi.get(`/api/public/quizzes/${quizId}`);
+    // Pre-caught: a failed answers fetch shouldn't drop a restoring student
+    // to the error screen — worst case they just see blank editors, same as
+    // before this fix.
+    const answersPromise = sess
+      ? publicApi
+          .get(`/api/public/submissions/${sess.submissionId}/answers`, {
+            headers: { Authorization: `Bearer ${sess.token}` },
+          })
+          .catch(() => ({ data: { answers: [] } }))
+      : Promise.resolve({ data: { answers: [] } });
+
+    Promise.all([quizPromise, answersPromise])
+      .then(([quizRes, answersRes]) => {
         if (canceled) return;
+        const data = quizRes.data;
         setQuiz(data);
 
-        // Try to restore an in-progress session from this tab.
-        const sessionStr = sessionStorage.getItem(`studentSession_${quizId}`);
-        if (sessionStr) {
-          try {
-            const sess = JSON.parse(sessionStr);
-            const payload = decodeJwtPayload(sess.token);
-            if (
-              payload &&
-              String(payload.quizId) === String(quizId) &&
-              payload.exp * 1000 > Date.now()
-            ) {
-              studentTokenRef.current = sess.token;
-              submissionIdRef.current = sess.submissionId;
-              setHasDbExtension(Boolean(sess.hasDatabaseExtension));
+        if (sess) {
+          studentTokenRef.current = sess.token;
+          submissionIdRef.current = sess.submissionId;
+          setHasDbExtension(Boolean(sess.hasDatabaseExtension));
 
-              const init = {};
-              data.questions.forEach((q) => { init[q.id] = ''; });
-              setAnswers(init);
+          // Pre-populate editors from previously saved answers — a student
+          // who refreshes mid-exam should see their saved work, not blank
+          // fields, and last-run SQL results should reappear too.
+          const { init, resultsInit, executedSet } = mergeAnswersIntoState(
+            data.questions,
+            answersRes.data.answers
+          );
+          setAnswers(init);
+          setSqlResults(resultsInit);
+          executedQuestionsRef.current = executedSet;
 
-              startTimer(sess.startedAt, sess.durationSeconds);
-              monitorCleanupRef.current = setupMonitoring(data.monitoringMode === 'strict');
+          // Use the freshly-fetched quiz data for timer fields, not the
+          // session snapshot from login time — the lecturer may have
+          // locked/unlocked the quiz since then, and this fetch reflects
+          // the current state (including currentlyPaused) immediately,
+          // so a refresh mid-pause lands on the pause overlay rather
+          // than a stale unpaused timer.
+          setTimerFields({
+            openedAt: data.openedAt,
+            totalPausedSeconds: data.totalPausedSeconds,
+            pausedAt: data.pausedAt,
+            currentlyPaused: data.currentlyPaused,
+            durationSeconds: data.durationSeconds,
+          });
+          startTimer();
+          monitorCleanupRef.current = setupMonitoring(data.monitoringMode === 'strict');
 
-              // Socket is created by the socket useEffect below once phase
-              // becomes 'active' — do NOT create it here.
-              setPhase('active');
-              return;
-            }
-          } catch {
-            sessionStorage.removeItem(`studentSession_${quizId}`);
-          }
+          // Socket is created by the socket useEffect below once phase
+          // becomes 'active' — do NOT create it here.
+          setPhase('active');
+          return;
         }
 
         setPhase('entry');
@@ -116,8 +189,13 @@ export default function QuizPage() {
       .catch((err) => {
         if (canceled) return;
         const status = err.response?.status;
+        const serverMsg = err.response?.data?.error;
         if (status === 404) {
           setErrorMsg('Quiz not found.');
+        } else if (status === 403 && serverMsg === 'This exam has been closed.') {
+          // Quiz is truly over (not just locked) — the backend already
+          // distinguishes this from a mid-exam lock, which now returns 200.
+          setErrorMsg(serverMsg);
         } else if (status === 403) {
           setErrorMsg('This quiz is not currently open. Please check with your instructor.');
         } else {
@@ -168,6 +246,23 @@ export default function QuizPage() {
     socket.on('error', (err) => {
       console.error('[socket error event]', err);
       setSocketWarning('Monitoring connection issue — your answers are still being saved.');
+    });
+
+    socket.on('quiz:paused', ({ pausedAt: serverPausedAt }) => {
+      pausedAtRef.current = serverPausedAt;
+      setCurrentlyPaused(true);
+    });
+
+    socket.on('quiz:resumed', ({ totalPausedSeconds: newTotal }) => {
+      totalPausedSecondsRef.current = newTotal;
+      pausedAtRef.current = null;
+      setCurrentlyPaused(false);
+    });
+
+    socket.on('quiz:closed', () => {
+      // Forced by the lecturer closing the quiz — no confirm dialog, same
+      // auto-submit path as timer expiry.
+      doSubmit(true);
     });
 
     return () => {
@@ -316,12 +411,38 @@ export default function QuizPage() {
     } catch {}
   }
 
-  function startTimer(startedAt, durationSeconds) {
-    if (!durationSeconds) return;
-    const deadline = new Date(startedAt).getTime() + durationSeconds * 1000;
+  // Snapshots the server's timer fields into refs (read by the tick loop)
+  // and mirrors currentlyPaused into state for rendering the overlay/icon.
+  function setTimerFields({ openedAt, totalPausedSeconds, pausedAt, currentlyPaused: paused, durationSeconds }) {
+    openedAtRef.current = openedAt;
+    totalPausedSecondsRef.current = totalPausedSeconds || 0;
+    pausedAtRef.current = paused ? pausedAt : null;
+    durationSecondsRef.current = durationSeconds;
+    setCurrentlyPaused(Boolean(paused));
+  }
+
+  // The exam timer runs from the quiz's single opened_at (set once, by the
+  // lecturer opening the quiz) rather than from each student's own login —
+  // total_paused_seconds and a live pausedAt freeze it during a lecturer lock.
+  function computeRemaining() {
+    const durationSeconds = durationSecondsRef.current;
+    const openedAt = openedAtRef.current;
+    if (!openedAt || !durationSeconds) return null;
+
+    const now = Date.now();
+    const elapsed = (now - new Date(openedAt).getTime()) / 1000
+      - totalPausedSecondsRef.current
+      - (pausedAtRef.current ? (now - new Date(pausedAtRef.current).getTime()) / 1000 : 0);
+
+    return Math.max(0, durationSeconds - elapsed);
+  }
+
+  function startTimer() {
+    if (!durationSecondsRef.current || timerRef.current) return;
 
     const tick = () => {
-      const remaining = Math.ceil((deadline - Date.now()) / 1000);
+      const remaining = computeRemaining();
+      if (remaining === null) return;
       if (remaining <= 0) {
         clearInterval(timerRef.current);
         timerRef.current = null;
@@ -329,7 +450,7 @@ export default function QuizPage() {
         doSubmit(true);
         return;
       }
-      setTimeLeft(remaining);
+      setTimeLeft(Math.ceil(remaining));
     };
 
     tick();
@@ -369,6 +490,10 @@ export default function QuizPage() {
         startedAt: data.startedAt,
         durationSeconds: data.durationSeconds,
         hasDatabaseExtension: data.hasDatabaseExtension,
+        openedAt: data.openedAt,
+        totalPausedSeconds: data.totalPausedSeconds,
+        pausedAt: data.pausedAt,
+        currentlyPaused: data.currentlyPaused,
       }));
       setHasDbExtension(Boolean(data.hasDatabaseExtension));
 
@@ -382,11 +507,34 @@ export default function QuizPage() {
       // Socket is created by the socket useEffect once phase becomes 'active'.
       monitorCleanupRef.current = setupMonitoring(quiz.monitoringMode === 'strict');
 
-      const init = {};
-      quiz.questions.forEach((q) => { init[q.id] = ''; });
+      // Fetch any previously saved answers — covers both a student resuming
+      // after closing the tab (sessionStorage expired/cleared) and a student
+      // logging back in after a lecturer reopened their submission, since
+      // submit() clears sessionStorage and neither case goes through the
+      // session-restore path above.
+      let savedAnswers = [];
+      try {
+        const answersRes = await publicApi.get(
+          `/api/public/submissions/${data.submissionId}/answers`,
+          { headers: { Authorization: `Bearer ${data.token}` } }
+        );
+        savedAnswers = answersRes.data.answers;
+      } catch {
+        // Fresh submission, or the fetch failed — proceed with blank editors.
+      }
+      const { init, resultsInit, executedSet } = mergeAnswersIntoState(quiz.questions, savedAnswers);
       setAnswers(init);
+      setSqlResults(resultsInit);
+      executedQuestionsRef.current = executedSet;
 
-      startTimer(data.startedAt, data.durationSeconds);
+      setTimerFields({
+        openedAt: data.openedAt,
+        totalPausedSeconds: data.totalPausedSeconds,
+        pausedAt: data.pausedAt,
+        currentlyPaused: data.currentlyPaused,
+        durationSeconds: data.durationSeconds,
+      });
+      startTimer();
 
       setPhase('active');
     } catch (err) {
@@ -534,7 +682,7 @@ export default function QuizPage() {
   if (phase === 'loading') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50">
-        <p className="text-sm text-gray-500">Loading…</p>
+        <p className="text-sm text-gray-500">{loadingLabel}</p>
       </div>
     );
   }
@@ -665,6 +813,24 @@ export default function QuizPage() {
   // phase === 'active'
   return (
     <div className="min-h-screen bg-gray-50">
+      {/* Pause overlay — not dismissable by the student */}
+      {currentlyPaused && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-gray-900/80">
+          <div className="mx-4 w-full max-w-md rounded-lg bg-white p-8 text-center shadow-xl">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100">
+              <span className="text-2xl" aria-hidden="true">⏸</span>
+            </div>
+            <h2 className="text-lg font-semibold text-gray-900">Exam Paused</h2>
+            <p className="mt-2 text-sm text-gray-600">
+              Your lecturer has temporarily paused the exam. Please wait — your work is saved and the timer has stopped.
+            </p>
+            <p className="mt-3 text-sm font-medium text-gray-900">
+              Do not close this window.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Strict-mode grace countdown overlay */}
       {graceCountdown !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/80">
@@ -707,14 +873,16 @@ export default function QuizPage() {
             {timeLeft !== null && (
               <span
                 className={`rounded-md px-2 py-1 font-mono text-sm font-medium tabular-nums ${
-                  timeLeft <= 60
-                    ? 'bg-red-50 text-red-600'
-                    : timeLeft <= 300
-                      ? 'bg-amber-50 text-amber-700'
-                      : 'text-gray-700'
+                  currentlyPaused
+                    ? 'bg-gray-100 text-gray-500'
+                    : timeLeft <= 60
+                      ? 'bg-red-50 text-red-600'
+                      : timeLeft <= 300
+                        ? 'bg-amber-50 text-amber-700'
+                        : 'text-gray-700'
                 }`}
               >
-                {formatTime(timeLeft)}
+                {currentlyPaused ? '⏸' : formatTime(timeLeft)}
               </span>
             )}
             <span className="inline-flex items-center gap-1.5 rounded-full border border-green-200 bg-green-50 px-2.5 py-1 text-xs font-medium text-green-700">

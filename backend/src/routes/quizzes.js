@@ -6,6 +6,7 @@ const multer = require("multer");
 const { pool } = require("../db/pool");
 const { requireAuth } = require("../middleware/requireAuth");
 const { restoreDatabase, dropDatabase, getTableCount } = require("../db/sqlServerOps");
+const { closeQuizAndEmit, QUIZ_FIELDS } = require("../db/quizLifecycle");
 
 const UPLOAD_DIR = "/app/uploads/db";
 
@@ -150,12 +151,13 @@ router.get("/:id/results", async (req, res) => {
 
   try {
     const ownerCheck = await pool.query(
-      `SELECT id FROM quizzes WHERE id = $1 AND lecturer_id = $2`,
+      `SELECT id, status FROM quizzes WHERE id = $1 AND lecturer_id = $2`,
       [quizId, req.lecturer.id]
     );
     if (!ownerCheck.rows[0]) {
       return res.status(404).json({ error: "Quiz not found" });
     }
+    const quizStatus = ownerCheck.rows[0].status;
 
     const [questionsResult, submissionsResult, answersResult, violationsResult] =
       await Promise.all([
@@ -255,7 +257,7 @@ router.get("/:id/results", async (req, res) => {
       };
     });
 
-    return res.json({ questions: questionsResult.rows, submissions });
+    return res.json({ quizStatus, questions: questionsResult.rows, submissions });
   } catch (err) {
     console.error("Get quiz results error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -333,6 +335,86 @@ router.post("/:id/grades", async (req, res) => {
   }
 });
 
+// POST /api/quizzes/:id/submissions/:submissionId/reopen
+// Resets an accidentally-submitted attempt back to in-progress: preserves
+// answer_text and execution results, drops+recreates the sandbox if the quiz
+// has a database extension, and leaves violations untouched so the lecturer
+// can still see what happened before the submit.
+router.post("/:id/submissions/:submissionId/reopen", async (req, res) => {
+  const quizId = Number(req.params.id);
+  const submissionId = Number(req.params.submissionId);
+  if (!Number.isInteger(quizId) || !Number.isInteger(submissionId)) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+
+  try {
+    const ownerCheck = await pool.query(
+      "SELECT id FROM quizzes WHERE id = $1 AND lecturer_id = $2",
+      [quizId, req.lecturer.id]
+    );
+    if (!ownerCheck.rows[0]) {
+      return res.status(404).json({ error: "Quiz not found" });
+    }
+
+    const subResult = await pool.query(
+      "SELECT id, quiz_id, submitted_at, sandbox_db_name, student_name FROM submissions WHERE id = $1",
+      [submissionId]
+    );
+    const submission = subResult.rows[0];
+    if (!submission || submission.quiz_id !== quizId) {
+      return res.status(404).json({ error: "Submission not found" });
+    }
+    if (submission.submitted_at === null) {
+      return res.status(400).json({ error: "This submission is already in progress." });
+    }
+
+    const extResult = await pool.query(
+      "SELECT backup_file_path FROM quiz_db_extensions WHERE quiz_id = $1 AND status = 'ready'",
+      [quizId]
+    );
+    const ext = extResult.rows[0];
+
+    if (ext) {
+      const sandboxName = `sandbox_${submissionId}`;
+      // Defensive — drop-on-submit should already have removed this, but a
+      // stale sandbox would make the RESTORE below fail with REPLACE anyway,
+      // so this is just belt-and-suspenders cleanup.
+      try {
+        await dropDatabase(sandboxName);
+      } catch (err) {
+        console.error(`Defensive pre-reopen drop failed for ${sandboxName}:`, err);
+      }
+      await restoreDatabase(ext.backup_file_path, sandboxName);
+      await pool.query(
+        `UPDATE submissions
+         SET submitted_at = NULL, auto_submitted = false, socket_connected = false, sandbox_db_name = $2
+         WHERE id = $1`,
+        [submissionId, sandboxName]
+      );
+    } else {
+      await pool.query(
+        `UPDATE submissions
+         SET submitted_at = NULL, auto_submitted = false, socket_connected = false
+         WHERE id = $1`,
+        [submissionId]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: "Submission reopened. Student can now log back in to continue their exam.",
+    });
+
+    req.app.get("io")?.to(`quiz:${quizId}`).emit("submission:reopened", {
+      submissionId,
+      studentEmail: submission.student_name,
+    });
+  } catch (err) {
+    console.error("Reopen submission error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Delete a quiz and all cascading data (questions, submissions, answers, violations).
 // ON DELETE CASCADE foreign keys in migrations 003 and 004 handle the cleanup.
 router.delete("/:id", async (req, res) => {
@@ -378,27 +460,54 @@ router.patch("/:id/status", async (req, res) => {
       return res.status(404).json({ error: "Quiz not found" });
     }
 
-    // opened_at is set the first time (and every time) a quiz transitions to
-    // open, since a lecturer can reopen a quiz they previously closed.
-    // closed_at is stamped whenever it moves to closed.
-    let updateQuery;
-    let params;
+    const io = req.app.get("io");
+
+    // opened_at is set only the first time a quiz opens — the exam timer
+    // runs from that single moment (not from each student's own login, and
+    // not reset on reopen), so any prior pause is folded into
+    // total_paused_seconds here rather than losing it on reopen.
     if (status === "open") {
-      updateQuery = `UPDATE quizzes SET status = $1, opened_at = now()
-                      WHERE id = $2 RETURNING id, title, status, duration_seconds, opened_at, closed_at`;
-      params = [status, quizId];
-    } else if (status === "closed") {
-      updateQuery = `UPDATE quizzes SET status = $1, closed_at = now()
-                      WHERE id = $2 RETURNING id, title, status, duration_seconds, opened_at, closed_at`;
-      params = [status, quizId];
-    } else {
-      updateQuery = `UPDATE quizzes SET status = $1
-                      WHERE id = $2 RETURNING id, title, status, duration_seconds, opened_at, closed_at`;
-      params = [status, quizId];
+      const { rows } = await pool.query(
+        `UPDATE quizzes
+         SET status = 'open',
+             opened_at = COALESCE(opened_at, now()),
+             total_paused_seconds = total_paused_seconds +
+               CASE WHEN paused_at IS NOT NULL
+                    THEN ROUND(EXTRACT(EPOCH FROM (now() - paused_at)))::integer
+                    ELSE 0 END,
+             paused_at = NULL
+         WHERE id = $1
+         RETURNING ${QUIZ_FIELDS}`,
+        [quizId]
+      );
+      const quiz = rows[0];
+      io?.to(`quiz:${quizId}`).emit("quiz:resumed", {
+        quizId,
+        totalPausedSeconds: quiz.total_paused_seconds,
+        resumedAt: new Date().toISOString(),
+      });
+      return res.json(quiz);
     }
 
-    const { rows } = await pool.query(updateQuery, params);
-    return res.json(rows[0]);
+    if (status === "locked") {
+      const { rows } = await pool.query(
+        `UPDATE quizzes SET status = 'locked', paused_at = now()
+         WHERE id = $1 RETURNING ${QUIZ_FIELDS}`,
+        [quizId]
+      );
+      const quiz = rows[0];
+      io?.to(`quiz:${quizId}`).emit("quiz:paused", {
+        quizId,
+        pausedAt: quiz.paused_at,
+      });
+      return res.json(quiz);
+    }
+
+    // status === "closed" — auto-submits active submissions and drops their
+    // sandboxes in the background (see closeQuizAndEmit); the lecturer's
+    // request doesn't wait for that sweep.
+    const quiz = await closeQuizAndEmit(io, quizId);
+    return res.json(quiz);
   } catch (err) {
     console.error("Update quiz status error:", err);
     return res.status(500).json({ error: "Internal server error" });

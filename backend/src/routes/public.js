@@ -5,6 +5,7 @@ const { pool } = require("../db/pool");
 const { requireStudentAuth } = require("../middleware/requireStudentAuth");
 const { restoreDatabase, dropDatabase } = require("../db/sqlServerOps");
 const { executeSql } = require("../db/sqlExecutor");
+const { closeQuizAndEmit } = require("../db/quizLifecycle");
 
 const router = express.Router();
 
@@ -23,6 +24,21 @@ function findForbiddenSql(sqlText) {
   return FORBIDDEN_SQL_PATTERNS.find((pattern) => pattern.test(sqlText));
 }
 
+// Belt-and-suspenders check — the frontend timer auto-submits before this
+// triggers in normal circumstances, but this catches edge cases (student
+// pauses JS, slow network, etc.) where a request slips in after time is up.
+function isQuizTimerExpired(quiz) {
+  if (!quiz.duration_seconds || !quiz.opened_at) return false;
+  const now = Date.now();
+  const openedAtMs = new Date(quiz.opened_at).getTime();
+  const pausedAtMs = quiz.paused_at ? new Date(quiz.paused_at).getTime() : null;
+  const effectiveElapsed =
+    (now - openedAtMs) / 1000 -
+    quiz.total_paused_seconds -
+    (pausedAtMs ? (now - pausedAtMs) / 1000 : 0);
+  return effectiveElapsed > quiz.duration_seconds;
+}
+
 // Used for timing-safe comparison when no enrollment row exists.
 const DUMMY_HASH = "$2b$10$invalidsaltinvalidsaltinvalidsa.aaaaaaaaaaaaaaaaaaaaa";
 
@@ -35,7 +51,9 @@ router.get("/quizzes/:id", async (req, res) => {
 
   try {
     const quizResult = await pool.query(
-      `SELECT id, title, status, duration_seconds, monitoring_mode FROM quizzes WHERE id = $1`,
+      `SELECT id, title, status, duration_seconds, monitoring_mode,
+              opened_at, total_paused_seconds, paused_at
+       FROM quizzes WHERE id = $1`,
       [quizId]
     );
     const quiz = quizResult.rows[0];
@@ -43,7 +61,15 @@ router.get("/quizzes/:id", async (req, res) => {
     if (!quiz) {
       return res.status(404).json({ error: "Quiz not found" });
     }
-    if (quiz.status !== "open") {
+    // 'locked' still returns quiz data — a student mid-exam whose lecturer
+    // paused the quiz needs to be able to refresh and land on the pause
+    // overlay rather than an error screen. A brand-new student sees the same
+    // login form either way; the login endpoint itself still rejects entry
+    // while locked, so this doesn't let anyone new into a paused exam.
+    if (quiz.status === "closed") {
+      return res.status(403).json({ error: "This exam has been closed." });
+    }
+    if (quiz.status !== "open" && quiz.status !== "locked") {
       return res.status(403).json({ error: "This quiz is not currently open" });
     }
 
@@ -57,6 +83,10 @@ router.get("/quizzes/:id", async (req, res) => {
       title: quiz.title,
       durationSeconds: quiz.duration_seconds,
       monitoringMode: quiz.monitoring_mode,
+      openedAt: quiz.opened_at,
+      totalPausedSeconds: quiz.total_paused_seconds,
+      pausedAt: quiz.status === "locked" ? quiz.paused_at : null,
+      currentlyPaused: quiz.status === "locked",
       questions: questionsResult.rows,
     });
   } catch (err) {
@@ -82,7 +112,8 @@ router.post("/quizzes/:id/login", async (req, res) => {
 
   try {
     const quizResult = await pool.query(
-      `SELECT id, status, duration_seconds FROM quizzes WHERE id = $1`,
+      `SELECT id, status, duration_seconds, opened_at, total_paused_seconds, paused_at
+       FROM quizzes WHERE id = $1`,
       [quizId]
     );
     const quiz = quizResult.rows[0];
@@ -194,6 +225,10 @@ router.post("/quizzes/:id/login", async (req, res) => {
       quizId,
       durationSeconds: quiz.duration_seconds,
       startedAt,
+      openedAt: quiz.opened_at,
+      totalPausedSeconds: quiz.total_paused_seconds,
+      pausedAt: quiz.status === "locked" ? quiz.paused_at : null,
+      currentlyPaused: quiz.status === "locked",
       hasDatabaseExtension,
       sandboxDbName,
     });
@@ -299,7 +334,11 @@ router.post("/submissions/:submissionId/answers", requireStudentAuth, async (req
 
   try {
     const submissionResult = await pool.query(
-      `SELECT s.id, s.submitted_at, s.quiz_id FROM submissions s WHERE s.id = $1`,
+      `SELECT s.id, s.submitted_at, s.quiz_id,
+              q.duration_seconds, q.opened_at, q.total_paused_seconds, q.paused_at
+       FROM submissions s
+       JOIN quizzes q ON q.id = s.quiz_id
+       WHERE s.id = $1`,
       [submissionId]
     );
     const submission = submissionResult.rows[0];
@@ -309,6 +348,11 @@ router.post("/submissions/:submissionId/answers", requireStudentAuth, async (req
     }
     if (submission.submitted_at !== null) {
       return res.status(400).json({ error: "This submission has already been submitted" });
+    }
+
+    if (isQuizTimerExpired(submission)) {
+      await closeQuizAndEmit(req.app.get("io"), submission.quiz_id);
+      return res.status(403).json({ error: "The exam time has expired." });
     }
 
     // Verify the question belongs to this submission's quiz.
@@ -334,6 +378,42 @@ router.post("/submissions/:submissionId/answers", requireStudentAuth, async (req
   }
 });
 
+// GET /api/public/submissions/:submissionId/answers
+// Returns previously saved answers for this submission, so the frontend can
+// pre-populate editors on a session restore (page refresh mid-exam) instead
+// of showing blank fields for work that's already safely saved.
+router.get("/submissions/:submissionId/answers", requireStudentAuth, async (req, res) => {
+  const submissionId = Number(req.params.submissionId);
+  if (!Number.isInteger(submissionId)) {
+    return res.status(400).json({ error: "Invalid submission id" });
+  }
+
+  if (submissionId !== req.student.submissionId) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT question_id, answer_text, last_execution_success, last_execution_result
+       FROM answers
+       WHERE submission_id = $1`,
+      [submissionId]
+    );
+
+    return res.json({
+      answers: rows.map((row) => ({
+        questionId: row.question_id,
+        answerText: row.answer_text,
+        lastExecutionSuccess: row.last_execution_success,
+        lastExecutionResult: row.last_execution_result,
+      })),
+    });
+  } catch (err) {
+    console.error("Get saved answers error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // POST /api/public/submissions/:submissionId/submit
 // Body: { autoSubmitted?: boolean }
 router.post("/submissions/:submissionId/submit", requireStudentAuth, async (req, res) => {
@@ -348,7 +428,8 @@ router.post("/submissions/:submissionId/submit", requireStudentAuth, async (req,
 
   try {
     const result = await pool.query(
-      `SELECT s.id, s.submitted_at, s.sandbox_db_name, q.duration_seconds, q.opened_at
+      `SELECT s.id, s.submitted_at, s.sandbox_db_name,
+              q.duration_seconds, q.opened_at, q.total_paused_seconds, q.paused_at
        FROM submissions s
        JOIN quizzes q ON q.id = s.quiz_id
        WHERE s.id = $1`,
@@ -363,16 +444,10 @@ router.post("/submissions/:submissionId/submit", requireStudentAuth, async (req,
       return res.status(400).json({ error: "This submission has already been submitted" });
     }
 
-    let isAutoSubmitted = Boolean(req.body.autoSubmitted);
-
     // Server-side enforcement: override to true if the student is past the deadline,
-    // regardless of what the client reported.
-    if (submission.duration_seconds !== null && submission.opened_at !== null) {
-      const deadline = new Date(submission.opened_at).getTime() + submission.duration_seconds * 1000;
-      if (Date.now() > deadline) {
-        isAutoSubmitted = true;
-      }
-    }
+    // regardless of what the client reported. Accounts for paused time so a
+    // lecturer-paused exam doesn't get force-flagged as auto-submitted.
+    let isAutoSubmitted = Boolean(req.body.autoSubmitted) || isQuizTimerExpired(submission);
 
     const updateResult = await pool.query(
       `UPDATE submissions
@@ -425,7 +500,11 @@ router.post("/student/execute", requireStudentAuth, async (req, res) => {
 
   try {
     const submissionResult = await pool.query(
-      `SELECT id, sandbox_db_name, submitted_at, quiz_id FROM submissions WHERE id = $1`,
+      `SELECT s.id, s.sandbox_db_name, s.submitted_at, s.quiz_id,
+              q.duration_seconds, q.opened_at, q.total_paused_seconds, q.paused_at
+       FROM submissions s
+       JOIN quizzes q ON q.id = s.quiz_id
+       WHERE s.id = $1`,
       [req.student.submissionId]
     );
     const submission = submissionResult.rows[0];
@@ -437,6 +516,10 @@ router.post("/student/execute", requireStudentAuth, async (req, res) => {
       return res.status(403).json({
         error: "This submission has already been submitted. Queries cannot be run after submission.",
       });
+    }
+    if (isQuizTimerExpired(submission)) {
+      await closeQuizAndEmit(req.app.get("io"), submission.quiz_id);
+      return res.status(403).json({ error: "The exam time has expired." });
     }
     if (!submission.sandbox_db_name) {
       return res.status(400).json({
