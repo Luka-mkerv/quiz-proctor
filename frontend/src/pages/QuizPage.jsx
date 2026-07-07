@@ -4,7 +4,16 @@ import { io } from 'socket.io-client';
 import axios from 'axios';
 import CodeMirror from '@uiw/react-codemirror';
 import { sql as sqlLang, MSSQL, PostgreSQL } from '@codemirror/lang-sql';
+import { Play, Send, Maximize2, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import SqlResultsPanel from '../components/SqlResultsPanel.jsx';
+import { cn } from '@/lib/utils';
+import { Card, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 
@@ -575,6 +584,13 @@ export default function QuizPage() {
     setAnswers((prev) => ({ ...prev, [questionId]: value }));
   }
 
+  function handleOptionSelect(questionId, letter) {
+    setAnswers((prev) => ({ ...prev, [questionId]: letter }));
+    clearTimeout(autosaveTimersRef.current[questionId]);
+    delete autosaveTimersRef.current[questionId];
+    saveAnswer(questionId, letter);
+  }
+
   async function handleRunQuery(questionId) {
     if (!submissionIdRef.current || submittedRef.current) return;
     const sqlText = answers[questionId] || '';
@@ -614,6 +630,7 @@ export default function QuizPage() {
   function getUnrunSqlQuestions() {
     if (!hasDbExtension || !quiz) return [];
     return quiz.questions.filter((q) =>
+      q.question_type === 'sql' &&
       !executedQuestionsRef.current.has(q.id) && (answers[q.id] || '').trim().length > 0
     );
   }
@@ -683,6 +700,7 @@ export default function QuizPage() {
   // Render
   // ═══════════════════════════════════════════
 
+  // ── Loading ──────────────────────────────────────────────────────────────
   if (phase === 'loading') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50">
@@ -691,181 +709,196 @@ export default function QuizPage() {
     );
   }
 
+  // ── Error ─────────────────────────────────────────────────────────────────
   if (phase === 'error') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-        <div className="w-full max-w-md rounded-lg border border-gray-200 bg-white p-6 text-center">
-          <p className="text-sm text-gray-700">{errorMsg}</p>
-        </div>
+        <Card className="w-full max-w-md text-center">
+          <CardContent className="pt-8 pb-8">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100">
+              <AlertTriangle className="h-6 w-6 text-gray-500" />
+            </div>
+            <p className="text-sm text-gray-700">{errorMsg}</p>
+          </CardContent>
+        </Card>
       </div>
     );
   }
 
+  // ── Submitted ─────────────────────────────────────────────────────────────
   if (phase === 'submitted') {
     const isViolationSubmit = submitReasonRef.current === 'violation';
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-        <div className="w-full max-w-md rounded-lg border border-gray-200 bg-white p-8 text-center">
-          {isViolationSubmit ? (
-            <>
-              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100">
-                <svg className="h-6 w-6 text-red-600" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-                </svg>
-              </div>
-              <div className="mb-3 inline-flex items-center rounded-full border border-red-200 bg-red-50 px-3 py-1 text-xs font-medium text-red-700">
-                Auto-submitted
-              </div>
-              <h1 className="text-lg font-semibold text-gray-900">Quiz submitted</h1>
-              <p className="mt-2 text-sm text-gray-600">
-                Your quiz was automatically submitted because you did not return within the time limit. Your answers up to this point have been recorded.
-              </p>
-            </>
-          ) : (
-            <>
-              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-green-100">
-                <svg className="h-6 w-6 text-green-600" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
-                </svg>
-              </div>
-              <h1 className="text-lg font-semibold text-gray-900">Submitted</h1>
-              <p className="mt-2 text-sm text-gray-600">
-                Your answers have been recorded. You may close this window.
-              </p>
-            </>
-          )}
-        </div>
+        <Card className="w-full max-w-md text-center">
+          <CardContent className="pt-8 pb-8">
+            {isViolationSubmit ? (
+              <>
+                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100">
+                  <AlertTriangle className="h-6 w-6 text-red-600" />
+                </div>
+                <Badge variant="outline" className="mb-3 border-red-200 bg-red-50 text-red-700">
+                  Auto-submitted
+                </Badge>
+                <h1 className="text-lg font-semibold text-gray-900">Quiz submitted</h1>
+                <p className="mt-2 text-sm text-gray-600">
+                  Your quiz was automatically submitted because you did not return within the time limit.
+                  Your answers up to this point have been recorded.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-green-100">
+                  <CheckCircle2 className="h-6 w-6 text-green-600" />
+                </div>
+                <h1 className="text-lg font-semibold text-gray-900">Submitted</h1>
+                <p className="mt-2 text-sm text-gray-600">
+                  Your answers have been recorded. You may close this window.
+                </p>
+              </>
+            )}
+          </CardContent>
+        </Card>
       </div>
     );
   }
 
+  // ── Entry (login form) ────────────────────────────────────────────────────
   if (phase === 'entry') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-        <div className="w-full max-w-md rounded-lg border border-gray-200 bg-white p-6">
-          <h1 className="text-xl font-semibold text-gray-900">{quiz.title}</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            {quiz.questions.length} question{quiz.questions.length !== 1 ? 's' : ''}
-            {quiz.durationSeconds
-              ? ` · ${Math.round(quiz.durationSeconds / 60)} min`
-              : ' · No time limit'}
-          </p>
+        <div className="w-full max-w-md space-y-4">
+          {/* Quiz info card */}
+          <Card>
+            <CardContent className="pt-5 pb-4">
+              <h1 className="text-xl font-semibold text-gray-900">{quiz.title}</h1>
+              <p className="mt-1 text-sm text-gray-500">
+                {quiz.questions.length} question{quiz.questions.length !== 1 ? 's' : ''}
+                {quiz.durationSeconds
+                  ? ` · ${Math.round(quiz.durationSeconds / 60)} min`
+                  : ' · No time limit'}
+              </p>
+            </CardContent>
+          </Card>
 
-          <form
-            onSubmit={(e) => { e.preventDefault(); handleLogin(); }}
-            className="mt-6 space-y-4"
-          >
-            <div>
-              <label htmlFor="studentEmail" className="mb-1.5 block text-sm font-medium text-gray-700">
-                Email
-              </label>
-              <input
-                id="studentEmail"
-                type="email"
-                value={studentEmail}
-                onChange={(e) => setStudentEmail(e.target.value)}
-                placeholder="you@university.edu"
-                autoFocus
-                autoComplete="email"
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            </div>
+          {/* Login form card */}
+          <Card>
+            <CardContent className="pt-6">
+              <form
+                onSubmit={(e) => { e.preventDefault(); handleLogin(); }}
+                className="space-y-4"
+              >
+                <div className="space-y-1.5">
+                  <Label htmlFor="studentEmail">Email</Label>
+                  <Input
+                    id="studentEmail"
+                    type="email"
+                    value={studentEmail}
+                    onChange={(e) => setStudentEmail(e.target.value)}
+                    placeholder="you@university.edu"
+                    autoFocus
+                    autoComplete="email"
+                  />
+                </div>
 
-            <div>
-              <label htmlFor="studentPassword" className="mb-1.5 block text-sm font-medium text-gray-700">
-                Password
-              </label>
-              <input
-                id="studentPassword"
-                type="password"
-                value={studentPassword}
-                onChange={(e) => setStudentPassword(e.target.value)}
-                placeholder="••••••••"
-                autoComplete="current-password"
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="studentPassword">Password</Label>
+                  <Input
+                    id="studentPassword"
+                    type="password"
+                    value={studentPassword}
+                    onChange={(e) => setStudentPassword(e.target.value)}
+                    placeholder="••••••••"
+                    autoComplete="current-password"
+                  />
+                </div>
 
-            {loginError && (
-              <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
-                {loginError}
-              </div>
-            )}
+                {loginError && (
+                  <Alert variant="destructive">
+                    <AlertDescription>{loginError}</AlertDescription>
+                  </Alert>
+                )}
 
-            <div className="flex items-start gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2.5 text-xs text-gray-600">
-              <svg className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-              </svg>
-              <span>
-                Proctored exam — fullscreen required, activity monitored
-              </span>
-            </div>
+                <div className="flex items-start gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-600">
+                  <svg className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                  </svg>
+                  <span>Proctored exam — fullscreen required, activity monitored</span>
+                </div>
 
-            <button
-              type="submit"
-              disabled={loggingIn}
-              className="w-full rounded-md bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {loggingIn ? 'Verifying…' : 'Enter exam'}
-            </button>
-          </form>
+                <Button
+                  type="submit"
+                  disabled={loggingIn}
+                  className="w-full bg-indigo-600 hover:bg-indigo-700"
+                >
+                  {loggingIn ? 'Verifying…' : 'Enter exam'}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
         </div>
       </div>
     );
   }
 
-  // phase === 'active'
+  // ── Active (exam in progress) ─────────────────────────────────────────────
+
   return (
     <div className="min-h-screen bg-gray-50">
+
       {/* Pause overlay — not dismissable by the student */}
       {currentlyPaused && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-gray-900/80">
-          <div className="mx-4 w-full max-w-md rounded-lg bg-white p-8 text-center shadow-xl">
-            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100">
-              <span className="text-2xl" aria-hidden="true">⏸</span>
-            </div>
-            <h2 className="text-lg font-semibold text-gray-900">Exam Paused</h2>
-            <p className="mt-2 text-sm text-gray-600">
-              Your lecturer has temporarily paused the exam. Please wait — your work is saved and the timer has stopped.
-            </p>
-            <p className="mt-3 text-sm font-medium text-gray-900">
-              Do not close this window.
-            </p>
-          </div>
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-gray-900/80 px-4">
+          <Card className="w-full max-w-md text-center shadow-xl">
+            <CardContent className="pt-8 pb-8">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100">
+                <span className="text-2xl" aria-hidden="true">⏸</span>
+              </div>
+              <h2 className="text-lg font-semibold text-gray-900">Exam Paused</h2>
+              <p className="mt-2 text-sm text-gray-600">
+                Your lecturer has temporarily paused the exam. Please wait — your work is saved and
+                the timer has stopped.
+              </p>
+              <p className="mt-3 text-sm font-medium text-gray-900">Do not close this window.</p>
+            </CardContent>
+          </Card>
         </div>
       )}
 
       {/* Strict-mode grace countdown overlay */}
       {graceCountdown !== null && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/80">
-          <div className="mx-4 w-full max-w-md rounded-lg bg-white p-8 text-center shadow-xl">
-            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100">
-              <svg className="h-6 w-6 text-red-600" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-              </svg>
-            </div>
-            <h2 className="text-lg font-semibold text-gray-900">Return to exam</h2>
-            <p className="mt-1 text-sm text-gray-600">
-              Auto-submit in <span className="font-medium text-gray-900">6 seconds</span> if not returned
-            </p>
-            <div
-              className={`my-6 text-6xl font-bold tabular-nums ${
-                graceCountdown <= 2
-                  ? 'text-red-600'
-                  : graceCountdown <= 4
-                    ? 'text-amber-600'
-                    : 'text-gray-900'
-              }`}
-            >
-              {graceCountdown}
-            </div>
-            <button
-              onClick={handleReturnToExam}
-              className="w-full rounded-md bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
-            >
-              Return now
-            </button>
-          </div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/80 px-4">
+          <Card className="w-full max-w-md text-center shadow-xl">
+            <CardContent className="pt-8 pb-8">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100">
+                <AlertTriangle className="h-6 w-6 text-red-600" />
+              </div>
+              <h2 className="text-lg font-semibold text-gray-900">Return to exam</h2>
+              <p className="mt-1 text-sm text-gray-600">
+                Auto-submit in{' '}
+                <span className="font-medium text-gray-900">6 seconds</span>{' '}
+                if not returned
+              </p>
+              <div
+                className={cn(
+                  'my-6 text-6xl font-bold tabular-nums',
+                  graceCountdown <= 2
+                    ? 'text-red-600'
+                    : graceCountdown <= 4
+                      ? 'text-amber-600'
+                      : 'text-gray-900',
+                )}
+              >
+                {graceCountdown}
+              </div>
+              <Button
+                onClick={handleReturnToExam}
+                className="w-full bg-indigo-600 hover:bg-indigo-700"
+              >
+                Return now
+              </Button>
+            </CardContent>
+          </Card>
         </div>
       )}
 
@@ -876,115 +909,167 @@ export default function QuizPage() {
           <div className="flex shrink-0 items-center gap-3">
             {timeLeft !== null && (
               <span
-                className={`rounded-md px-2 py-1 font-mono text-sm font-medium tabular-nums ${
+                className={cn(
+                  'rounded-md px-2.5 py-1 font-mono text-sm font-medium tabular-nums',
                   currentlyPaused
                     ? 'bg-gray-100 text-gray-500'
                     : timeLeft <= 60
                       ? 'bg-red-50 text-red-600'
                       : timeLeft <= 300
                         ? 'bg-amber-50 text-amber-700'
-                        : 'text-gray-700'
-                }`}
+                        : 'text-gray-700',
+                )}
               >
                 {currentlyPaused ? '⏸' : formatTime(timeLeft)}
               </span>
             )}
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-green-200 bg-green-50 px-2.5 py-1 text-xs font-medium text-green-700">
-              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" />
+            <Badge
+              variant="outline"
+              className="border-green-200 bg-green-50 text-green-700 text-xs"
+            >
+              <span className="mr-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" />
               Monitored
-            </span>
+            </Badge>
           </div>
         </div>
+
+        {/* Socket warning */}
+        {socketWarning && (
+          <div className="border-t border-amber-200 bg-amber-50 px-6 py-2 text-center text-xs text-amber-800">
+            {socketWarning}
+          </div>
+        )}
+
+        {/* Fullscreen warning */}
+        {!inFullscreen && (
+          <div className="flex items-center justify-between gap-4 border-t border-amber-200 bg-amber-50 px-6 py-2.5">
+            <p className="text-sm font-medium text-amber-900">
+              Fullscreen exited — this has been recorded
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleReenterFullscreen}
+              className="shrink-0 border-amber-300 bg-amber-100 text-amber-900 hover:bg-amber-200"
+            >
+              <Maximize2 className="h-3.5 w-3.5 mr-1.5" />
+              Return to fullscreen
+            </Button>
+          </div>
+        )}
       </div>
-
-      {socketWarning && (
-        <div className="border-b border-amber-200 bg-amber-50 px-6 py-2 text-center text-xs text-amber-800">
-          {socketWarning}
-        </div>
-      )}
-
-      {!inFullscreen && (
-        <div className="flex items-center justify-between gap-4 border-b border-amber-200 bg-amber-50 px-6 py-2.5">
-          <p className="text-sm font-medium text-amber-900">
-            Fullscreen exited — this has been recorded
-          </p>
-          <button
-            onClick={handleReenterFullscreen}
-            className="shrink-0 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-amber-700"
-          >
-            Return to fullscreen
-          </button>
-        </div>
-      )}
 
       {/* Questions */}
       <main className="mx-auto max-w-3xl space-y-6 px-6 py-8">
         {quiz.questions.map((q, i) => (
-          <div key={q.id} className="rounded-lg border border-gray-200 bg-white p-6">
-            <div className="mb-4 flex gap-3">
-              <span className="shrink-0 font-medium tabular-nums text-indigo-600">{i + 1}</span>
-              <p className="text-sm text-gray-900">{q.prompt}</p>
-            </div>
-            {hasDbExtension ? (
-              <div>
-                <div className="overflow-hidden rounded-md border border-gray-300">
-                  <CodeMirror
-                    value={answers[q.id] ?? ''}
-                    height="200px"
-                    extensions={[sqlLang({ dialect: dbEngine === 'postgres' ? PostgreSQL : MSSQL })]}
-                    onChange={(value) => handleSqlChange(q.id, value)}
-                    placeholder="Write your SQL query here..."
-                  />
-                </div>
-                <div className="mt-2 flex items-center gap-3">
-                  <button
-                    onClick={() => handleRunQuery(q.id)}
-                    disabled={sqlRunning[q.id]}
-                    className="rounded-md bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {sqlRunning[q.id] ? 'Running…' : 'Run Query'}
-                  </button>
-                  <p className="text-xs text-gray-500">
-                    Your query is saved each time you run it.
-                    {' '}
-                    {dbEngine === 'postgres'
-                      ? 'Use semicolons to separate statements.'
-                      : 'Use GO to separate batches.'}
-                  </p>
-                </div>
-
-                {sqlRunError[q.id] && (
-                  <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
-                    {sqlRunError[q.id]}
-                  </div>
-                )}
-
-                {sqlResults[q.id] && (
-                  <div className="mt-3 rounded-md border border-gray-200 bg-gray-50 p-3">
-                    <SqlResultsPanel results={sqlResults[q.id]} compact={false} />
-                  </div>
-                )}
+          <Card key={q.id}>
+            <CardContent className="pt-6">
+              {/* Question prompt */}
+              <div className="mb-5 flex gap-3">
+                <span className="shrink-0 font-semibold tabular-nums text-indigo-600">{i + 1}</span>
+                <p className="text-sm text-gray-900 leading-relaxed">{q.prompt}</p>
               </div>
-            ) : (
-              <textarea
-                rows={8}
-                value={answers[q.id] ?? ''}
-                onChange={(e) => handleAnswerChange(q.id, e.target.value)}
-                onBlur={(e) => handleAnswerBlur(q.id, e.target.value)}
-                placeholder="Enter your answer…"
-                className="w-full resize-y rounded-md border border-gray-300 px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            )}
-          </div>
+
+              {/* Multiple choice */}
+              {q.question_type === 'multiple_choice' && (
+                <div className="space-y-2">
+                  {q.options?.map((opt) => {
+                    const selected = answers[q.id] === opt.letter;
+                    return (
+                      <button
+                        key={opt.letter}
+                        type="button"
+                        onClick={() => handleOptionSelect(q.id, opt.letter)}
+                        className={cn(
+                          'flex w-full items-center gap-3 rounded-lg border px-4 py-3 text-left text-sm transition-colors',
+                          'focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1',
+                          selected
+                            ? 'border-indigo-400 bg-indigo-50 text-indigo-900'
+                            : 'border-gray-200 text-gray-700 hover:border-gray-300 hover:bg-gray-50',
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            'flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold',
+                            selected ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-500',
+                          )}
+                        >
+                          {opt.letter}
+                        </span>
+                        <span>{opt.text}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* SQL editor */}
+              {q.question_type === 'sql' && hasDbExtension && (
+                <div className="space-y-3">
+                  <div className="overflow-hidden rounded-lg border border-gray-300">
+                    <CodeMirror
+                      value={answers[q.id] ?? ''}
+                      height="200px"
+                      extensions={[sqlLang({ dialect: dbEngine === 'postgres' ? PostgreSQL : MSSQL })]}
+                      onChange={(value) => handleSqlChange(q.id, value)}
+                      placeholder="Write your SQL query here..."
+                    />
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Button
+                      onClick={() => handleRunQuery(q.id)}
+                      disabled={sqlRunning[q.id]}
+                      className="bg-indigo-600 hover:bg-indigo-700"
+                    >
+                      <Play className="h-3.5 w-3.5 mr-1.5" />
+                      {sqlRunning[q.id] ? 'Running…' : 'Run Query'}
+                    </Button>
+                    <p className="text-xs text-gray-500">
+                      Your query is saved each time you run it.
+                      {' '}
+                      {dbEngine === 'postgres'
+                        ? 'Use semicolons to separate statements.'
+                        : 'Use GO to separate batches.'}
+                    </p>
+                  </div>
+                  {sqlRunError[q.id] && (
+                    <Alert variant="destructive">
+                      <AlertDescription>{sqlRunError[q.id]}</AlertDescription>
+                    </Alert>
+                  )}
+                  {sqlResults[q.id] && (
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                      <SqlResultsPanel results={sqlResults[q.id]} compact={false} />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Open text / SQL without DB extension */}
+              {(q.question_type === 'open' || (q.question_type === 'sql' && !hasDbExtension)) && (
+                <Textarea
+                  rows={8}
+                  value={answers[q.id] ?? ''}
+                  onChange={(e) => handleAnswerChange(q.id, e.target.value)}
+                  onBlur={(e) => handleAnswerBlur(q.id, e.target.value)}
+                  placeholder="Enter your answer…"
+                  className="resize-y"
+                />
+              )}
+            </CardContent>
+          </Card>
         ))}
 
-        <div className="flex flex-col items-start gap-2 border-t border-gray-200 pt-6">
-          <button
+        {/* Submit section */}
+        <div className="flex flex-col items-start gap-2 border-t border-gray-200 pt-6 pb-8">
+          <Button
             onClick={handleManualSubmitClick}
-            className="rounded-md bg-indigo-600 px-6 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+            size="lg"
+            className="bg-indigo-600 hover:bg-indigo-700 px-8"
           >
+            <Send className="h-4 w-4 mr-2" />
             Submit quiz
-          </button>
+          </Button>
           <p className="text-xs text-gray-500">
             Answers saved automatically — submit when finished
           </p>

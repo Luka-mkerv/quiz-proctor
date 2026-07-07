@@ -46,8 +46,42 @@ const router = express.Router();
 
 router.use(requireAuth);
 
+const QUESTION_TYPES = ["open", "multiple_choice", "sql"];
+
+// Validates one question's options array for question_type = 'multiple_choice'.
+// Returns an error string, or null if valid.
+function validateOptions(options) {
+  if (!Array.isArray(options) || options.length < 2) {
+    return "multiple_choice questions require an options array with at least 2 items";
+  }
+
+  const seenLetters = new Set();
+  let correctCount = 0;
+
+  for (const opt of options) {
+    if (!opt.letter || typeof opt.letter !== "string" || !opt.letter.trim()) {
+      return "each option requires a non-empty letter";
+    }
+    if (!opt.text || typeof opt.text !== "string" || !opt.text.trim()) {
+      return "each option requires non-empty text";
+    }
+    const letter = opt.letter.trim();
+    if (seenLetters.has(letter)) {
+      return `duplicate option letter: ${letter}`;
+    }
+    seenLetters.add(letter);
+    if (opt.is_correct === true) correctCount++;
+  }
+
+  if (correctCount !== 1) {
+    return "exactly one option must be marked as correct";
+  }
+
+  return null;
+}
+
 // Create a quiz with its questions in one call.
-// Body: { title: string, durationSeconds?: number, questions: [{ prompt: string }] }
+// Body: { title: string, durationSeconds?: number, questions: [{ prompt, question_type?, max_points?, options? }] }
 router.post("/", async (req, res) => {
   const { title, durationSeconds, questions, monitoringMode } = req.body;
 
@@ -65,6 +99,16 @@ router.post("/", async (req, res) => {
       const mp = Number(q.max_points);
       if (!isFinite(mp) || mp < 1 || mp > 100) {
         return res.status(400).json({ error: "max_points must be between 1 and 100" });
+      }
+    }
+    const questionType = q.question_type || "open";
+    if (!QUESTION_TYPES.includes(questionType)) {
+      return res.status(400).json({ error: `question_type must be one of: ${QUESTION_TYPES.join(", ")}` });
+    }
+    if (questionType === "multiple_choice") {
+      const optionsError = validateOptions(q.options);
+      if (optionsError) {
+        return res.status(400).json({ error: optionsError });
       }
     }
   }
@@ -86,13 +130,31 @@ router.post("/", async (req, res) => {
 
     const insertedQuestions = [];
     for (let i = 0; i < questions.length; i++) {
+      const questionType = questions[i].question_type || "open";
       const { rows } = await client.query(
-        `INSERT INTO questions (quiz_id, prompt, question_order, max_points)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, prompt, question_order, max_points`,
-        [quiz.id, questions[i].prompt.trim(), i, Number(questions[i].max_points) || 10]
+        `INSERT INTO questions (quiz_id, prompt, question_order, max_points, question_type)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, prompt, question_order, max_points, question_type`,
+        [quiz.id, questions[i].prompt.trim(), i, Number(questions[i].max_points) || 10, questionType]
       );
-      insertedQuestions.push(rows[0]);
+      const insertedQuestion = rows[0];
+
+      if (questionType === "multiple_choice") {
+        const options = [];
+        for (let j = 0; j < questions[i].options.length; j++) {
+          const opt = questions[i].options[j];
+          const { rows: optRows } = await client.query(
+            `INSERT INTO question_options (question_id, option_letter, option_text, option_order, is_correct)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, option_letter, option_text, option_order, is_correct`,
+            [insertedQuestion.id, opt.letter.trim(), opt.text.trim(), j, opt.is_correct === true]
+          );
+          options.push(optRows[0]);
+        }
+        insertedQuestion.options = options;
+      }
+
+      insertedQuestions.push(insertedQuestion);
     }
 
     await client.query("COMMIT");
@@ -143,12 +205,39 @@ router.get("/:id", async (req, res) => {
     }
 
     const questionsResult = await pool.query(
-      `SELECT id, prompt, question_order FROM questions
+      `SELECT id, prompt, question_order, max_points, question_type FROM questions
        WHERE quiz_id = $1 ORDER BY question_order ASC`,
       [quizId]
     );
 
-    return res.json({ ...quiz, questions: questionsResult.rows });
+    const optionsResult = await pool.query(
+      `SELECT qo.question_id, qo.id, qo.option_letter, qo.option_text, qo.option_order, qo.is_correct
+       FROM question_options qo
+       JOIN questions q ON q.id = qo.question_id
+       WHERE q.quiz_id = $1
+       ORDER BY qo.question_id, qo.option_order ASC`,
+      [quizId]
+    );
+    const optionsByQuestion = new Map();
+    for (const row of optionsResult.rows) {
+      if (!optionsByQuestion.has(row.question_id)) {
+        optionsByQuestion.set(row.question_id, []);
+      }
+      optionsByQuestion.get(row.question_id).push({
+        id: row.id,
+        letter: row.option_letter,
+        text: row.option_text,
+        order: row.option_order,
+        is_correct: row.is_correct,
+      });
+    }
+
+    const questions = questionsResult.rows.map((q) => ({
+      ...q,
+      options: q.question_type === "multiple_choice" ? (optionsByQuestion.get(q.id) || []) : undefined,
+    }));
+
+    return res.json({ ...quiz, questions });
   } catch (err) {
     console.error("Get quiz error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -172,13 +261,24 @@ router.get("/:id/results", async (req, res) => {
     }
     const quizStatus = ownerCheck.rows[0].status;
 
-    const [questionsResult, submissionsResult, answersResult, violationsResult] =
+    const [questionsResult, optionsResult, submissionsResult, answersResult, violationsResult] =
       await Promise.all([
         pool.query(
-          `SELECT id, prompt, question_order, max_points
-           FROM questions
-           WHERE quiz_id = $1
-           ORDER BY question_order ASC`,
+          `SELECT q.id, q.prompt, q.question_order, q.max_points, q.question_type,
+                  correct.option_letter AS correct_option
+           FROM questions q
+           LEFT JOIN question_options correct
+             ON correct.question_id = q.id AND correct.is_correct = true
+           WHERE q.quiz_id = $1
+           ORDER BY q.question_order ASC`,
+          [quizId]
+        ),
+        pool.query(
+          `SELECT qo.question_id, qo.option_letter, qo.option_text, qo.option_order
+           FROM question_options qo
+           JOIN questions q ON q.id = qo.question_id
+           WHERE q.quiz_id = $1
+           ORDER BY qo.question_id, qo.option_order ASC`,
           [quizId]
         ),
         pool.query(
@@ -196,6 +296,7 @@ router.get("/:id/results", async (req, res) => {
                   COALESCE(a.answer_text, '') AS answer_text,
                   a.last_execution_success,
                   a.last_execution_result,
+                  a.is_correct,
                   g.points,
                   g.notes
            FROM submissions s
@@ -226,6 +327,7 @@ router.get("/:id/results", async (req, res) => {
         answer_text: row.answer_text,
         last_execution_success: row.last_execution_success,
         last_execution_result: row.last_execution_result,
+        is_correct: row.is_correct,
         points: row.points,
         notes: row.notes,
       });
@@ -242,7 +344,24 @@ router.get("/:id/results", async (req, res) => {
       });
     }
 
-    const totalPossible = questionsResult.rows.reduce(
+    const optionsByQuestion = new Map();
+    for (const row of optionsResult.rows) {
+      if (!optionsByQuestion.has(row.question_id)) {
+        optionsByQuestion.set(row.question_id, []);
+      }
+      optionsByQuestion.get(row.question_id).push({
+        letter: row.option_letter,
+        text: row.option_text,
+        order: row.option_order,
+      });
+    }
+
+    const questions = questionsResult.rows.map((q) => ({
+      ...q,
+      options: q.question_type === "multiple_choice" ? (optionsByQuestion.get(q.id) || []) : undefined,
+    }));
+
+    const totalPossible = questions.reduce(
       (sum, q) => sum + parseFloat(q.max_points),
       0
     );
@@ -270,7 +389,7 @@ router.get("/:id/results", async (req, res) => {
       };
     });
 
-    return res.json({ quizStatus, questions: questionsResult.rows, submissions });
+    return res.json({ quizStatus, questions, submissions });
   } catch (err) {
     console.error("Get quiz results error:", err);
     return res.status(500).json({ error: "Internal server error" });

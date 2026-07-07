@@ -1,28 +1,66 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { ChevronRight, BarChart2, Activity, Check, X, AlertTriangle, RotateCcw } from 'lucide-react';
 import api from '../lib/api.js';
+import { cn } from '@/lib/utils';
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Separator } from '@/components/ui/separator';
+import {
+  Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
+} from '@/components/ui/table';
 import { ViolationPanel } from '../components/ViolationPanel.jsx';
 import SqlResultsPanel from '../components/SqlResultsPanel.jsx';
+
+// ─── Badge sub-components ─────────────────────────────────────────────────────
 
 function ExecutionBadge({ lastExecutionSuccess }) {
   if (lastExecutionSuccess === true) {
     return (
-      <span className="inline-flex items-center rounded-full border border-green-200 bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700">
+      <Badge variant="outline" className="border-green-200 bg-green-50 text-green-700 text-xs">
         ✅ Ran successfully
-      </span>
+      </Badge>
     );
   }
   if (lastExecutionSuccess === false) {
     return (
-      <span className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700">
+      <Badge variant="outline" className="border-red-200 bg-red-50 text-red-700 text-xs">
         ❌ Had errors
-      </span>
+      </Badge>
     );
   }
   return (
-    <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">
+    <Badge variant="outline" className="border-gray-200 bg-gray-100 text-gray-500 text-xs">
       Not executed
-    </span>
+    </Badge>
+  );
+}
+
+function QuestionTypeBadge({ questionType }) {
+  if (questionType !== 'multiple_choice') return null;
+  return (
+    <Badge variant="outline" className="border-purple-200 bg-purple-50 text-purple-700 text-xs">
+      Multiple Choice
+    </Badge>
+  );
+}
+
+function AutoGradeBadge({ isCorrect, maxPoints }) {
+  if (isCorrect === null || isCorrect === undefined) return null;
+  if (isCorrect) {
+    return (
+      <Badge variant="outline" className="border-green-200 bg-green-50 text-green-700 text-xs">
+        ✓ Auto: {maxPoints}/{maxPoints} pts
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="outline" className="border-red-200 bg-red-50 text-red-700 text-xs">
+      ✗ Auto: 0/{maxPoints} pts
+    </Badge>
   );
 }
 
@@ -37,38 +75,73 @@ function MonitorStatus({ socket_connected, submitted_at }) {
   }
   if (submitted_at) {
     return (
-      <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-800">
+      <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800 text-xs">
         ⚠️ Bypassed exam interface
-      </span>
+      </Badge>
     );
   }
-  return <span className="text-gray-400">—</span>;
+  return <span className="text-gray-400 text-xs">—</span>;
 }
 
 function SubmissionStatus({ submitted_at, auto_submitted }) {
   if (!submitted_at) {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600">
-        <span className="h-1.5 w-1.5 rounded-full bg-gray-400" />
+      <Badge variant="outline" className="border-gray-200 bg-gray-100 text-gray-600 text-xs">
+        <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-gray-400 inline-block" />
         In progress
-      </span>
+      </Badge>
     );
   }
   if (auto_submitted) {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700">
-        <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+      <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-700 text-xs">
+        <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-amber-500 inline-block" />
         Auto-submitted
-      </span>
+      </Badge>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-green-200 bg-green-50 px-2.5 py-0.5 text-xs font-medium text-green-700">
-      <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
+    <Badge variant="outline" className="border-green-200 bg-green-50 text-green-700 text-xs">
+      <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-green-500 inline-block" />
       Submitted
-    </span>
+    </Badge>
   );
 }
+
+// ─── MultipleChoiceOptions ────────────────────────────────────────────────────
+
+function MultipleChoiceOptions({ options, studentLetter, correctLetter }) {
+  return (
+    <div className="space-y-1.5">
+      {options.map((opt) => {
+        const isCorrect = opt.letter === correctLetter;
+        const isSelected = opt.letter === studentLetter;
+        let icon = '○';
+        let cls = 'border-gray-200 text-gray-600';
+        if (isCorrect) {
+          icon = '✓';
+          cls = 'border-green-200 bg-green-50 text-green-800';
+        } else if (isSelected) {
+          icon = '✗';
+          cls = 'border-red-200 bg-red-50 text-red-800';
+        }
+        return (
+          <div
+            key={opt.letter}
+            className={cn('flex items-center gap-2.5 rounded-md border px-3 py-2 text-sm', cls)}
+          >
+            <span className="w-4 shrink-0 text-center font-semibold">{icon}</span>
+            <span className="w-5 shrink-0 font-semibold">{opt.letter}</span>
+            <span className="flex-1">{opt.text}</span>
+            {isSelected && <span className="shrink-0 text-xs opacity-75">student&apos;s answer</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── GradeCard ────────────────────────────────────────────────────────────────
 
 function GradeCard({ question, answer, quizId, submissionId, onSaved }) {
   const maxPts = parseFloat(question.max_points);
@@ -104,70 +177,98 @@ function GradeCard({ question, answer, quizId, submissionId, onSaved }) {
     status === 'error'  ? 'Error — retry' :
     'Save Grade';
 
-  const saveCls =
-    status === 'saved'  ? 'bg-green-600 hover:bg-green-700 focus-visible:ring-green-500' :
-    status === 'error'  ? 'bg-red-600 hover:bg-red-700 focus-visible:ring-red-500' :
-    'bg-indigo-600 hover:bg-indigo-700 focus-visible:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed';
+  const isMultipleChoice = question.question_type === 'multiple_choice';
 
   return (
-    <div className="space-y-3 rounded-md border border-gray-200 bg-white p-4">
-      <div className="flex items-baseline gap-2">
-        <h3 className="text-sm font-medium text-gray-900">
-          Q{question.question_order + 1}
-        </h3>
-        <span className="text-xs text-gray-400">{question.max_points} pts</span>
-        <ExecutionBadge lastExecutionSuccess={answer.last_execution_success} />
-      </div>
-      <p className="text-sm text-gray-700">{question.prompt}</p>
-      <div>
-        <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-gray-400">Answer</p>
-        <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-gray-200 bg-gray-50 px-4 py-3 font-mono text-sm text-gray-900">
-          {answer.answer_text
-            ? answer.answer_text
-            : <span className="font-sans italic text-gray-400">No answer</span>
+    <Card>
+      <CardContent className="pt-4 space-y-3">
+        {/* Question header */}
+        <div className="flex flex-wrap items-baseline gap-2">
+          <h3 className="text-sm font-medium text-gray-900">Q{question.question_order + 1}</h3>
+          <span className="text-xs text-gray-400">{question.max_points} pts</span>
+          <QuestionTypeBadge questionType={question.question_type} />
+          {isMultipleChoice
+            ? <AutoGradeBadge isCorrect={answer.is_correct} maxPoints={question.max_points} />
+            : <ExecutionBadge lastExecutionSuccess={answer.last_execution_success} />
           }
-        </pre>
-      </div>
-      {answer.last_execution_result && (
-        <div>
-          <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-gray-400">Last execution result</p>
-          <div className="rounded-md border border-gray-200 bg-gray-50 p-3">
-            <SqlResultsPanel results={answer.last_execution_result} compact />
+        </div>
+        <p className="text-sm text-gray-700">{question.prompt}</p>
+
+        {/* Answer display */}
+        {isMultipleChoice ? (
+          <div>
+            <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-gray-400">Options</p>
+            <MultipleChoiceOptions
+              options={question.options ?? []}
+              studentLetter={answer.answer_text || null}
+              correctLetter={question.correct_option}
+            />
           </div>
-        </div>
-      )}
-      <div className="flex flex-wrap items-center gap-3 border-t border-gray-200 pt-3">
-        <div className="flex items-center gap-2">
-          <label className="text-sm font-medium text-gray-700">Points</label>
-          <input
-            type="number"
-            min={0}
-            max={maxPts}
-            step={0.5}
-            value={pts}
-            onChange={(e) => { setPts(e.target.value); setStatus(null); }}
-            className="w-20 rounded-md border border-gray-300 px-2.5 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        ) : (
+          <div>
+            <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-gray-400">Answer</p>
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-gray-200 bg-gray-50 px-4 py-3 font-mono text-sm text-gray-900">
+              {answer.answer_text
+                ? answer.answer_text
+                : <span className="font-sans italic text-gray-400">No answer</span>
+              }
+            </pre>
+          </div>
+        )}
+
+        {/* Last execution result */}
+        {answer.last_execution_result && (
+          <div>
+            <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-gray-400">Last execution result</p>
+            <div className="rounded-md border border-gray-200 bg-gray-50 p-3">
+              <SqlResultsPanel results={answer.last_execution_result} compact />
+            </div>
+          </div>
+        )}
+
+        <Separator />
+
+        {/* Grading row */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-gray-700">Points</span>
+            <Input
+              type="number"
+              min={0}
+              max={maxPts}
+              step={0.5}
+              value={pts}
+              onChange={(e) => { setPts(e.target.value); setStatus(null); }}
+              className="w-20 text-right"
+            />
+            <span className="text-sm text-gray-500">/ {question.max_points}</span>
+          </div>
+          <Input
+            type="text"
+            value={notes}
+            onChange={(e) => { setNotes(e.target.value); setStatus(null); }}
+            placeholder="Notes (optional)"
+            className="min-w-40 flex-1"
           />
-          <span className="text-sm text-gray-500">/ {question.max_points}</span>
+          <Button
+            onClick={handleSave}
+            disabled={status === 'saving'}
+            className={cn(
+              'shrink-0',
+              status === 'saved'  ? 'bg-green-600 hover:bg-green-700' :
+              status === 'error'  ? 'bg-red-600 hover:bg-red-700' :
+              'bg-indigo-600 hover:bg-indigo-700',
+            )}
+          >
+            {saveLabel}
+          </Button>
         </div>
-        <input
-          type="text"
-          value={notes}
-          onChange={(e) => { setNotes(e.target.value); setStatus(null); }}
-          placeholder="Notes (optional)"
-          className="min-w-40 flex-1 rounded-md border border-gray-300 px-2.5 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-        />
-        <button
-          onClick={handleSave}
-          disabled={status === 'saving'}
-          className={`shrink-0 rounded-md px-4 py-1.5 text-sm font-medium text-white transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${saveCls}`}
-        >
-          {saveLabel}
-        </button>
-      </div>
-    </div>
+      </CardContent>
+    </Card>
   );
 }
+
+// ─── GradingPanel ─────────────────────────────────────────────────────────────
 
 function GradingPanel({ submission, questions, quizId, onGradeUpdated, onClose, onPrev, onNext, hasPrev, hasNext }) {
   return (
@@ -175,13 +276,15 @@ function GradingPanel({ submission, questions, quizId, onGradeUpdated, onClose, 
       {/* Header */}
       <div className="flex items-center justify-between border-b border-indigo-200 bg-white px-5 py-3">
         <div className="flex min-w-0 items-center gap-3">
-          <button
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={onPrev}
             disabled={!hasPrev}
-            className="rounded-md px-2.5 py-1 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-30"
+            className="text-gray-600"
           >
             ← Prev
-          </button>
+          </Button>
           <div className="min-w-0">
             <p className="truncate text-sm font-medium text-gray-900">{submission.student_name}</p>
             <div className="mt-1">
@@ -191,21 +294,25 @@ function GradingPanel({ submission, questions, quizId, onGradeUpdated, onClose, 
               />
             </div>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={onNext}
             disabled={!hasNext}
-            className="rounded-md px-2.5 py-1 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-30"
+            className="text-gray-600"
           >
             Next →
-          </button>
+          </Button>
         </div>
-        <button
+        <Button
+          variant="ghost"
+          size="icon"
           onClick={onClose}
           aria-label="Close"
-          className="ml-4 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
+          className="ml-4 h-7 w-7 shrink-0 text-gray-400 hover:text-gray-700"
         >
-          ✕
-        </button>
+          <X className="h-4 w-4" />
+        </Button>
       </div>
 
       {/* Grade cards */}
@@ -235,6 +342,8 @@ function GradingPanel({ submission, questions, quizId, onGradeUpdated, onClose, 
   );
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 function scoreLabel(submission) {
   const possible = submission.total_points_possible;
   if (submission.total_points_awarded == null) return `— / ${possible} pts`;
@@ -242,6 +351,8 @@ function scoreLabel(submission) {
   const rounded = Number.isInteger(awarded) ? awarded : awarded.toFixed(2).replace(/\.?0+$/, '');
   return `${rounded} / ${possible} pts`;
 }
+
+// ─── Main component ───────────────────────────────────────────────────────────
 
 export default function QuizResults() {
   const { id } = useParams();
@@ -309,9 +420,11 @@ export default function QuizResults() {
     }
   }
 
+  // ── Loading / error screens ───────────────────────────────────────────────
+
   if (loading) {
     return (
-      <main className="p-8">
+      <main className="flex min-h-screen items-center justify-center bg-gray-50">
         <p className="text-sm text-gray-500">Loading…</p>
       </main>
     );
@@ -320,10 +433,13 @@ export default function QuizResults() {
   if (error || !results) {
     return (
       <main className="p-8">
-        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
-          {error || 'Failed to load results'}
-        </div>
-        <Link to={`/dashboard/quizzes/${id}`} className="mt-4 inline-block text-sm font-medium text-gray-500 transition-colors hover:text-gray-900">
+        <Alert variant="destructive" className="max-w-md">
+          <AlertDescription>{error || 'Failed to load results'}</AlertDescription>
+        </Alert>
+        <Link
+          to={`/dashboard/quizzes/${id}`}
+          className="mt-4 inline-block text-sm font-medium text-gray-500 transition-colors hover:text-gray-900"
+        >
           ← Back
         </Link>
       </main>
@@ -342,135 +458,204 @@ export default function QuizResults() {
     ? submissions.find((s) => s.id === violationId) ?? null
     : null;
 
+  // ── Render ────────────────────────────────────────────────────────────────
+
   return (
-    <main className="p-8">
-      <div className="mb-6">
-        <Link to={`/dashboard/quizzes/${id}`} className="text-sm font-medium text-gray-500 transition-colors hover:text-gray-900">
-          ← Back
-        </Link>
-        <h1 className="mt-2 text-xl font-semibold text-gray-900">Results & Grading</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          {submissions.length} submission{submissions.length !== 1 ? 's' : ''}
-        </p>
+    <div className="flex min-h-screen flex-col bg-gray-50">
+
+      {/* Breadcrumb */}
+      <header className="border-b border-gray-200 bg-white px-6 py-3">
+        <nav className="flex items-center gap-1 text-sm">
+          <Link to="/dashboard" className="text-gray-500 transition-colors hover:text-gray-900">
+            Quizzes
+          </Link>
+          <ChevronRight className="h-3.5 w-3.5 text-gray-400" />
+          <Link
+            to={`/dashboard/quizzes/${id}`}
+            className="text-gray-500 transition-colors hover:text-gray-900"
+          >
+            Quiz
+          </Link>
+          <ChevronRight className="h-3.5 w-3.5 text-gray-400" />
+          <span className="font-medium text-gray-900">Results &amp; Grading</span>
+        </nav>
+      </header>
+
+      {/* Page content */}
+      <div className="flex-1 overflow-auto">
+        <div className="mx-auto max-w-5xl space-y-6 px-6 py-6 pb-24">
+
+          {/* Page title + grading progress */}
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 className="text-xl font-semibold text-gray-900">Results &amp; Grading</h1>
+              <p className="mt-1 text-sm text-gray-500">
+                {submissions.length} submission{submissions.length !== 1 ? 's' : ''}
+              </p>
+            </div>
+            {submissions.length > 0 && (
+              <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm">
+                <span className="font-medium text-gray-900">Graded:</span>
+                <span className="text-gray-700">{gradedCount} / {submissions.length}</span>
+                {gradedCount === submissions.length && submissions.length > 0 && (
+                  <Badge variant="outline" className="border-green-200 bg-green-50 text-green-700 text-xs">
+                    ✓ Complete
+                  </Badge>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Empty state */}
+          {submissions.length === 0 && (
+            <Card>
+              <CardContent className="flex flex-col items-center justify-center py-16 text-center">
+                <p className="text-sm text-gray-500">No submissions yet</p>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Submissions table */}
+          {submissions.length > 0 && (
+            <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-gray-50 hover:bg-gray-50">
+                    <TableHead className="h-10 text-xs font-medium uppercase tracking-wide text-gray-500">Student</TableHead>
+                    <TableHead className="h-10 text-xs font-medium uppercase tracking-wide text-gray-500">Submitted</TableHead>
+                    <TableHead className="h-10 text-xs font-medium uppercase tracking-wide text-gray-500">Status</TableHead>
+                    <TableHead className="h-10 text-xs font-medium uppercase tracking-wide text-gray-500">Monitor</TableHead>
+                    <TableHead className="h-10 text-xs font-medium uppercase tracking-wide text-gray-500">Score</TableHead>
+                    <TableHead className="h-10 text-xs font-medium uppercase tracking-wide text-gray-500">Flags</TableHead>
+                    <TableHead className="h-10 text-xs font-medium uppercase tracking-wide text-gray-500">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {submissions.map((s, idx) => (
+                    <TableRow
+                      key={s.id}
+                      className={cn(
+                        'transition-colors',
+                        gradingIdx === idx ? 'bg-indigo-50 hover:bg-indigo-50' : '',
+                      )}
+                    >
+                      <TableCell className="font-medium text-gray-900">{s.student_name}</TableCell>
+                      <TableCell className="text-xs text-gray-500">
+                        {s.submitted_at
+                          ? new Date(s.submitted_at).toLocaleString()
+                          : <span className="text-gray-400">—</span>}
+                      </TableCell>
+                      <TableCell>
+                        <div className="space-y-1.5">
+                          <SubmissionStatus submitted_at={s.submitted_at} auto_submitted={s.auto_submitted} />
+                          {canReopen(s) && (
+                            <div>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => handleReopen(s)}
+                                disabled={reopeningId === s.id}
+                                className="h-6 px-2 text-xs"
+                              >
+                                <RotateCcw className="h-3 w-3 mr-1" />
+                                {reopeningId === s.id ? 'Reopening…' : 'Reopen'}
+                              </Button>
+                              {reopenError[s.id] && (
+                                <p className="mt-1 max-w-[10rem] text-xs text-red-600">{reopenError[s.id]}</p>
+                              )}
+                            </div>
+                          )}
+                          {reopenSuccessId === s.id && (
+                            <p className="max-w-[10rem] text-xs text-green-600">
+                              Reopened — student can now log back in
+                            </p>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <MonitorStatus socket_connected={s.socket_connected} submitted_at={s.submitted_at} />
+                      </TableCell>
+                      <TableCell className="tabular-nums">
+                        <span className={s.total_points_awarded == null ? 'text-gray-400' : 'font-medium text-gray-900'}>
+                          {scoreLabel(s)}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <button
+                          onClick={() => setViolationId(s.id)}
+                          className="group inline-flex cursor-pointer items-center gap-2 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+                        >
+                          {s.violation_count > 0 ? (
+                            <Badge
+                              variant="outline"
+                              className="border-red-200 bg-red-50 text-red-700 group-hover:bg-red-100 text-xs cursor-pointer"
+                            >
+                              {s.violation_count}
+                            </Badge>
+                          ) : (
+                            <span className="text-gray-400 text-sm">—</span>
+                          )}
+                        </button>
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          variant={gradingIdx === idx ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => setGradingIdx(gradingIdx === idx ? null : idx)}
+                          className={cn(
+                            'h-7 px-3 text-xs',
+                            gradingIdx === idx
+                              ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                              : '',
+                          )}
+                        >
+                          {gradingIdx === idx ? 'Close' : 'Grade'}
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+
+          {/* Grading panel */}
+          {gradingSubmission && (
+            <GradingPanel
+              submission={gradingSubmission}
+              questions={questions}
+              quizId={id}
+              onGradeUpdated={handleGradeUpdated}
+              onClose={() => setGradingIdx(null)}
+              onPrev={() => setGradingIdx((i) => Math.max(0, i - 1))}
+              onNext={() => setGradingIdx((i) => Math.min(submissions.length - 1, i + 1))}
+              hasPrev={gradingIdx > 0}
+              hasNext={gradingIdx < submissions.length - 1}
+            />
+          )}
+
+        </div>
       </div>
 
-      {submissions.length > 0 && (
-        <div className="mb-5 inline-flex items-center gap-2 rounded-md border border-gray-200 bg-white px-4 py-2 text-sm">
-          <span className="font-medium text-gray-900">Graded:</span>
-          <span className="text-gray-700">
-            {gradedCount} / {submissions.length}
-          </span>
-          {gradedCount === submissions.length && submissions.length > 0 && (
-            <span className="font-medium text-green-600">✓ Complete</span>
-          )}
+      {/* Sticky bottom bar */}
+      <div className="fixed bottom-0 left-56 right-0 z-10 flex items-center justify-between border-t border-gray-200 bg-white px-6 py-3">
+        <span className="text-sm font-medium text-gray-700">Results &amp; Grading</span>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" asChild>
+            <Link to={`/dashboard/quizzes/${id}`}>
+              ← Back to quiz
+            </Link>
+          </Button>
+          <Button size="sm" className="bg-indigo-600 hover:bg-indigo-700" asChild>
+            <Link to={`/dashboard/quizzes/${id}/monitor`}>
+              <Activity className="h-3.5 w-3.5 mr-1.5" />
+              Live Monitor
+            </Link>
+          </Button>
         </div>
-      )}
+      </div>
 
-      {submissions.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-gray-200 bg-white py-16 text-center">
-          <p className="text-sm text-gray-500">No submissions yet</p>
-        </div>
-      ) : (
-        <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-200 bg-gray-50">
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Student</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Submitted</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Monitor</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Score</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Flags</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {submissions.map((s, idx) => (
-                <tr
-                  key={s.id}
-                  className={`transition-colors ${gradingIdx === idx ? 'bg-indigo-50' : 'hover:bg-gray-50'}`}
-                >
-                  <td className="px-4 py-3 font-medium text-gray-900">{s.student_name}</td>
-                  <td className="px-4 py-3 text-xs text-gray-500">
-                    {s.submitted_at
-                      ? new Date(s.submitted_at).toLocaleString()
-                      : <span className="text-gray-400">—</span>}
-                  </td>
-                  <td className="px-4 py-3">
-                    <SubmissionStatus submitted_at={s.submitted_at} auto_submitted={s.auto_submitted} />
-                    {canReopen(s) && (
-                      <div className="mt-1.5">
-                        <button
-                          onClick={() => handleReopen(s)}
-                          disabled={reopeningId === s.id}
-                          className="inline-flex items-center gap-1 rounded-md border border-gray-300 bg-white px-2 py-0.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {reopeningId === s.id ? 'Reopening…' : '↩ Reopen'}
-                        </button>
-                        {reopenError[s.id] && (
-                          <p className="mt-1 max-w-[10rem] text-xs text-red-600">{reopenError[s.id]}</p>
-                        )}
-                      </div>
-                    )}
-                    {reopenSuccessId === s.id && (
-                      <p className="mt-1 max-w-[10rem] text-xs text-green-600">Reopened — student can now log back in</p>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    <MonitorStatus socket_connected={s.socket_connected} submitted_at={s.submitted_at} />
-                  </td>
-                  <td className="px-4 py-3 text-gray-700 tabular-nums">
-                    <span className={s.total_points_awarded == null ? 'text-gray-400' : 'font-medium text-gray-900'}>
-                      {scoreLabel(s)}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <button
-                      onClick={() => setViolationId(s.id)}
-                      className="group inline-flex cursor-pointer items-center gap-2 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
-                    >
-                      {s.violation_count > 0 ? (
-                        <span className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700 transition-colors group-hover:bg-red-100">
-                          {s.violation_count}
-                        </span>
-                      ) : (
-                        <span className="text-gray-400">—</span>
-                      )}
-                    </button>
-                  </td>
-                  <td className="px-4 py-3">
-                    <button
-                      onClick={() => setGradingIdx(gradingIdx === idx ? null : idx)}
-                      className={`rounded-md px-3 py-1 text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 ${
-                        gradingIdx === idx
-                          ? 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200'
-                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                      }`}
-                    >
-                      {gradingIdx === idx ? 'Close' : 'Grade'}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {gradingSubmission && (
-        <GradingPanel
-          submission={gradingSubmission}
-          questions={questions}
-          quizId={id}
-          onGradeUpdated={handleGradeUpdated}
-          onClose={() => setGradingIdx(null)}
-          onPrev={() => setGradingIdx((i) => Math.max(0, i - 1))}
-          onNext={() => setGradingIdx((i) => Math.min(submissions.length - 1, i + 1))}
-          hasPrev={gradingIdx > 0}
-          hasNext={gradingIdx < submissions.length - 1}
-        />
-      )}
-
+      {/* Violation side panel */}
       {violationSubmission && (
         <ViolationPanel
           title={violationSubmission.student_name}
@@ -484,6 +669,6 @@ export default function QuizResults() {
           onClose={() => setViolationId(null)}
         />
       )}
-    </main>
+    </div>
   );
 }

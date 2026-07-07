@@ -61,6 +61,47 @@ function isQuizTimerExpired(quiz) {
 // Used for timing-safe comparison when no enrollment row exists.
 const DUMMY_HASH = "$2b$10$invalidsaltinvalidsaltinvalidsa.aaaaaaaaaaaaaaaaaaaaa";
 
+// Grades every multiple_choice question in the quiz for this submission,
+// including questions the student never answered (no answer = wrong = 0
+// points). Runs synchronously as part of submit, since the lecturer results
+// view and the sandbox-drop cleanup both need the grade recorded immediately
+// — this can't be deferred to a background job the way sandbox cleanup is.
+async function autoGradeMultipleChoice(submissionId, quizId, lecturerId) {
+  const { rows } = await pool.query(
+    `SELECT q.id AS question_id, q.max_points, correct.option_letter AS correct_letter,
+            a.answer_text
+     FROM questions q
+     LEFT JOIN question_options correct
+       ON correct.question_id = q.id AND correct.is_correct = true
+     LEFT JOIN answers a
+       ON a.question_id = q.id AND a.submission_id = $2
+     WHERE q.quiz_id = $1 AND q.question_type = 'multiple_choice'`,
+    [quizId, submissionId]
+  );
+
+  for (const row of rows) {
+    const isCorrect = row.answer_text != null && row.answer_text === row.correct_letter;
+    const points = isCorrect ? row.max_points : 0;
+    const notes = isCorrect ? "Auto-graded: correct" : "Auto-graded: incorrect";
+
+    await pool.query(
+      `INSERT INTO answers (submission_id, question_id, answer_text, is_correct)
+       VALUES ($1, $2, COALESCE($3, ''), $4)
+       ON CONFLICT (submission_id, question_id)
+       DO UPDATE SET is_correct = EXCLUDED.is_correct`,
+      [submissionId, row.question_id, row.answer_text, isCorrect]
+    );
+
+    await pool.query(
+      `INSERT INTO grades (submission_id, question_id, points, graded_by, notes)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (submission_id, question_id)
+       DO UPDATE SET points = EXCLUDED.points, notes = EXCLUDED.notes, graded_at = now()`,
+      [submissionId, row.question_id, points, lecturerId, notes]
+    );
+  }
+}
+
 // GET /api/public/quizzes/:id
 router.get("/quizzes/:id", async (req, res) => {
   const quizId = Number(req.params.id);
@@ -93,9 +134,36 @@ router.get("/quizzes/:id", async (req, res) => {
     }
 
     const questionsResult = await pool.query(
-      `SELECT id, prompt FROM questions WHERE quiz_id = $1 ORDER BY question_order ASC`,
+      `SELECT id, prompt, question_type FROM questions WHERE quiz_id = $1 ORDER BY question_order ASC`,
       [quizId]
     );
+
+    const optionsResult = await pool.query(
+      `SELECT qo.question_id, qo.id, qo.option_letter, qo.option_text, qo.option_order
+       FROM question_options qo
+       JOIN questions q ON q.id = qo.question_id
+       WHERE q.quiz_id = $1
+       ORDER BY qo.question_id, qo.option_order ASC`,
+      [quizId]
+    );
+    const optionsByQuestion = new Map();
+    for (const row of optionsResult.rows) {
+      if (!optionsByQuestion.has(row.question_id)) {
+        optionsByQuestion.set(row.question_id, []);
+      }
+      // is_correct intentionally omitted — students must not see the answer key.
+      optionsByQuestion.get(row.question_id).push({
+        id: row.id,
+        letter: row.option_letter,
+        text: row.option_text,
+        order: row.option_order,
+      });
+    }
+
+    const questions = questionsResult.rows.map((q) => ({
+      ...q,
+      options: q.question_type === "multiple_choice" ? (optionsByQuestion.get(q.id) || []) : undefined,
+    }));
 
     return res.json({
       id: quiz.id,
@@ -106,7 +174,7 @@ router.get("/quizzes/:id", async (req, res) => {
       totalPausedSeconds: quiz.total_paused_seconds,
       pausedAt: quiz.status === "locked" ? quiz.paused_at : null,
       currentlyPaused: quiz.status === "locked",
-      questions: questionsResult.rows,
+      questions,
     });
   } catch (err) {
     console.error("Get public quiz error:", err);
@@ -480,8 +548,8 @@ router.post("/submissions/:submissionId/submit", requireStudentAuth, async (req,
 
   try {
     const result = await pool.query(
-      `SELECT s.id, s.submitted_at, s.sandbox_db_name,
-              q.duration_seconds, q.opened_at, q.total_paused_seconds, q.paused_at
+      `SELECT s.id, s.submitted_at, s.sandbox_db_name, s.quiz_id,
+              q.duration_seconds, q.opened_at, q.total_paused_seconds, q.paused_at, q.lecturer_id
        FROM submissions s
        JOIN quizzes q ON q.id = s.quiz_id
        WHERE s.id = $1`,
@@ -510,6 +578,13 @@ router.post("/submissions/:submissionId/submit", requireStudentAuth, async (req,
     );
 
     const updated = updateResult.rows[0];
+
+    // Auto-grade multiple choice questions before responding — grades must be
+    // recorded before the sandbox drop below, and the lecturer results view
+    // reads them immediately after submission, so this can't be deferred to
+    // the background like the sandbox cleanup is.
+    await autoGradeMultipleChoice(submissionId, submission.quiz_id, submission.lecturer_id);
+
     res.json({
       submittedAt: updated.submitted_at,
       autoSubmitted: updated.auto_submitted,
