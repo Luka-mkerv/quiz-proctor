@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import axios from 'axios';
 import CodeMirror from '@uiw/react-codemirror';
-import { sql as sqlLang } from '@codemirror/lang-sql';
+import { sql as sqlLang, MSSQL, PostgreSQL } from '@codemirror/lang-sql';
 import SqlResultsPanel from '../components/SqlResultsPanel.jsx';
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000';
@@ -62,6 +62,7 @@ export default function QuizPage() {
   // Active quiz UI
   const [answers, setAnswers] = useState({});
   const [hasDbExtension, setHasDbExtension] = useState(false);
+  const [dbEngine, setDbEngine] = useState('sqlserver');
   const [sqlResults, setSqlResults] = useState({});
   const [sqlRunning, setSqlRunning] = useState({});
   const [sqlRunError, setSqlRunError] = useState({});
@@ -150,6 +151,7 @@ export default function QuizPage() {
           studentTokenRef.current = sess.token;
           submissionIdRef.current = sess.submissionId;
           setHasDbExtension(Boolean(sess.hasDatabaseExtension));
+          setDbEngine(sess.dbEngine || 'sqlserver');
 
           // Pre-populate editors from previously saved answers — a student
           // who refreshes mid-exam should see their saved work, not blank
@@ -490,12 +492,14 @@ export default function QuizPage() {
         startedAt: data.startedAt,
         durationSeconds: data.durationSeconds,
         hasDatabaseExtension: data.hasDatabaseExtension,
+        dbEngine: data.dbEngine,
         openedAt: data.openedAt,
         totalPausedSeconds: data.totalPausedSeconds,
         pausedAt: data.pausedAt,
         currentlyPaused: data.currentlyPaused,
       }));
       setHasDbExtension(Boolean(data.hasDatabaseExtension));
+      setDbEngine(data.dbEngine || 'sqlserver');
 
       try {
         await document.documentElement.requestFullscreen();
@@ -927,7 +931,7 @@ export default function QuizPage() {
                   <CodeMirror
                     value={answers[q.id] ?? ''}
                     height="200px"
-                    extensions={[sqlLang()]}
+                    extensions={[sqlLang({ dialect: dbEngine === 'postgres' ? PostgreSQL : MSSQL })]}
                     onChange={(value) => handleSqlChange(q.id, value)}
                     placeholder="Write your SQL query here..."
                   />
@@ -942,6 +946,10 @@ export default function QuizPage() {
                   </button>
                   <p className="text-xs text-gray-500">
                     Your query is saved each time you run it.
+                    {' '}
+                    {dbEngine === 'postgres'
+                      ? 'Use semicolons to separate statements.'
+                      : 'Use GO to separate batches.'}
                   </p>
                 </div>
 

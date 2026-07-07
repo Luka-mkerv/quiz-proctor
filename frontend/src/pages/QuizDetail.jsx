@@ -26,6 +26,8 @@ const SUB_STATUS_LABELS = {
   submitted:   'Submitted',
 };
 
+const ENGINE_LABELS = { sqlserver: 'SQL Server', postgres: 'PostgreSQL' };
+
 function formatDuration(seconds) {
   if (!seconds) return 'No time limit';
   const mins = Math.round(seconds / 60);
@@ -66,6 +68,7 @@ export default function QuizDetail() {
 
   // Database extension state
   const [extension, setExtension] = useState(undefined); // undefined = loading, null = none
+  const [extEngine, setExtEngine] = useState('sqlserver');
   const [extFile, setExtFile] = useState(null);
   const [extUploading, setExtUploading] = useState(false);
   const [extError, setExtError] = useState('');
@@ -234,11 +237,11 @@ export default function QuizDetail() {
     try {
       const formData = new FormData();
       formData.append('file', extFile);
-      await api.post(`/api/quizzes/${id}/extensions/database`, formData, {
+      await api.post(`/api/quizzes/${id}/extensions/database?engine=${extEngine}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
       setExtFile(null);
-      setExtension({ status: 'restoring' });
+      setExtension({ status: 'restoring', engine: extEngine });
       startExtPoll();
     } catch (err) {
       setExtError(err.response?.data?.error || 'Upload failed.');
@@ -535,12 +538,44 @@ export default function QuizDetail() {
         {extension === null && (
           <div>
             <p className="mb-3 text-sm text-gray-500">
-              Attach a SQL Server backup (.bak) so each student gets a fresh, writable copy of the database to query during the exam.
+              Attach a database backup so each student gets a fresh, writable copy of the database to query during the exam.
             </p>
+
+            <div className="mb-3">
+              <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-gray-500">Engine</p>
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-1.5 text-sm text-gray-700">
+                  <input
+                    type="radio"
+                    name="extEngine"
+                    value="sqlserver"
+                    checked={extEngine === 'sqlserver'}
+                    onChange={() => { setExtEngine('sqlserver'); setExtFile(null); }}
+                  />
+                  SQL Server (.bak file)
+                </label>
+                <label className="flex items-center gap-1.5 text-sm text-gray-700">
+                  <input
+                    type="radio"
+                    name="extEngine"
+                    value="postgres"
+                    checked={extEngine === 'postgres'}
+                    onChange={() => { setExtEngine('postgres'); setExtFile(null); }}
+                  />
+                  PostgreSQL (.sql dump file)
+                </label>
+              </div>
+              <p className="mt-1.5 text-xs text-gray-400">
+                {extEngine === 'postgres'
+                  ? 'Upload a .sql dump file (output of pg_dump)'
+                  : 'Upload a .bak backup file from SQL Server Management Studio'}
+              </p>
+            </div>
+
             <div className="flex items-center gap-3">
               <input
                 type="file"
-                accept=".bak"
+                accept={extEngine === 'postgres' ? '.sql' : '.bak'}
                 onChange={(e) => setExtFile(e.target.files[0] ?? null)}
                 className="block text-sm text-gray-600 file:mr-3 file:rounded-md file:border file:border-gray-300 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-gray-700 file:transition-colors hover:file:bg-gray-50"
               />
@@ -570,7 +605,9 @@ export default function QuizDetail() {
             <div className="flex items-center gap-2 text-sm text-gray-700">
               <span className="flex h-5 w-5 items-center justify-center rounded-full bg-green-100 text-green-600 text-xs font-bold">✓</span>
               <span>
-                <span className="font-medium">{extension.original_filename}</span>
+                <span className="font-medium">
+                  {ENGINE_LABELS[extension.engine] ?? 'SQL Server'} — {extension.original_filename}
+                </span>
                 {extension.table_count !== null && (
                   <span className="ml-1 text-gray-400">({extension.table_count} tables)</span>
                 )}

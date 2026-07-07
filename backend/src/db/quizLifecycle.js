@@ -1,5 +1,6 @@
 const { pool } = require("./pool");
 const { dropDatabase } = require("./sqlServerOps");
+const { dropPostgresSandbox } = require("./postgresOps");
 
 const QUIZ_FIELDS =
   "id, title, status, duration_seconds, opened_at, closed_at, paused_at, total_paused_seconds";
@@ -27,7 +28,8 @@ async function autoSubmitAllActiveSubmissions(quizId) {
         }
         if (s.sandbox_db_name) {
           try {
-            await dropDatabase(s.sandbox_db_name);
+            const drop = s.sandbox_db_name.endsWith("_pg") ? dropPostgresSandbox : dropDatabase;
+            await drop(s.sandbox_db_name);
           } catch (err) {
             console.error(`Failed to drop sandbox ${s.sandbox_db_name}:`, err);
           }

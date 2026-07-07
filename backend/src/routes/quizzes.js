@@ -6,22 +6,35 @@ const multer = require("multer");
 const { pool } = require("../db/pool");
 const { requireAuth } = require("../middleware/requireAuth");
 const { restoreDatabase, dropDatabase, getTableCount } = require("../db/sqlServerOps");
+const {
+  createPostgresTemplate,
+  dropPostgresTemplate,
+  createPostgresSandbox,
+  dropPostgresSandbox,
+} = require("../db/postgresOps");
 const { closeQuizAndEmit, QUIZ_FIELDS } = require("../db/quizLifecycle");
 
 const UPLOAD_DIR = "/app/uploads/db";
 
-// Multer: save uploaded .bak files to the shared mssql_backups volume.
-// Filename is determined per-request (quiz_${id}.bak) so we configure it in
-// the route handler using a diskStorage factory.
-function buildUpload(quizId) {
+const ENGINE_EXTENSIONS = { sqlserver: ".bak", postgres: ".sql" };
+
+// Multer: save the uploaded backup/dump file to the shared volume. Filename
+// is determined per-request (quiz_${id}.bak or quiz_${id}.sql) so we
+// configure it in the route handler using a diskStorage factory. `engine` is
+// read from a query param rather than a multipart body field — multer only
+// parses body fields as it streams the multipart parts in order, so relying
+// on a body field here would break if the frontend ever appends it after the
+// file field in the FormData.
+function buildUpload(quizId, engine) {
+  const ext = ENGINE_EXTENSIONS[engine];
   return multer({
     storage: multer.diskStorage({
       destination: UPLOAD_DIR,
-      filename: (_req, _file, cb) => cb(null, `quiz_${quizId}.bak`),
+      filename: (_req, _file, cb) => cb(null, `quiz_${quizId}${ext}`),
     }),
     fileFilter: (_req, file, cb) => {
-      if (!file.originalname.toLowerCase().endsWith(".bak")) {
-        return cb(new Error("Only .bak files are accepted"));
+      if (!file.originalname.toLowerCase().endsWith(ext)) {
+        return cb(new Error(`Only ${ext} files are accepted for the ${engine} engine`));
       }
       cb(null, true);
     },
@@ -369,12 +382,29 @@ router.post("/:id/submissions/:submissionId/reopen", async (req, res) => {
     }
 
     const extResult = await pool.query(
-      "SELECT backup_file_path FROM quiz_db_extensions WHERE quiz_id = $1 AND status = 'ready'",
+      "SELECT backup_file_path, engine FROM quiz_db_extensions WHERE quiz_id = $1 AND status = 'ready'",
       [quizId]
     );
     const ext = extResult.rows[0];
 
-    if (ext) {
+    if (ext && ext.engine === "postgres") {
+      const sandboxName = `sandbox_${submissionId}_pg`;
+      // Defensive — drop-on-submit should already have removed this, but a
+      // stale sandbox would make CREATE DATABASE ... TEMPLATE below fail
+      // anyway, so this is just belt-and-suspenders cleanup.
+      try {
+        await dropPostgresSandbox(sandboxName);
+      } catch (err) {
+        console.error(`Defensive pre-reopen drop failed for ${sandboxName}:`, err);
+      }
+      await createPostgresSandbox(submissionId, quizId);
+      await pool.query(
+        `UPDATE submissions
+         SET submitted_at = NULL, auto_submitted = false, socket_connected = false, sandbox_db_name = $2
+         WHERE id = $1`,
+        [submissionId, sandboxName]
+      );
+    } else if (ext) {
       const sandboxName = `sandbox_${submissionId}`;
       // Defensive — drop-on-submit should already have removed this, but a
       // stale sandbox would make the RESTORE below fail with REPLACE anyway,
@@ -681,7 +711,7 @@ router.get("/:id/extensions/database", async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      `SELECT id, status, original_filename, table_count, error_message, created_at
+      `SELECT id, status, engine, original_filename, table_count, error_message, created_at
        FROM quiz_db_extensions WHERE quiz_id = $1`,
       [quizId]
     );
@@ -693,14 +723,17 @@ router.get("/:id/extensions/database", async (req, res) => {
   }
 });
 
-// POST /api/quizzes/:id/extensions/database
-// Accepts a multipart .bak upload, writes it to the shared volume, then kicks off
-// a RESTORE in the background. Responds immediately with { status: 'restoring' }.
+// POST /api/quizzes/:id/extensions/database?engine=sqlserver|postgres
+// Accepts a multipart upload (.bak for sqlserver, .sql for postgres), writes it
+// to the shared volume, then kicks off template creation in the background.
+// Responds immediately with { status: 'restoring' }.
 router.post("/:id/extensions/database", async (req, res) => {
   const quizId = Number(req.params.id);
   if (!Number.isInteger(quizId)) {
     return res.status(400).json({ error: "Invalid quiz id" });
   }
+
+  const engine = req.query.engine === "postgres" ? "postgres" : "sqlserver";
 
   // Verify ownership before accepting the file.
   const ownerCheck = await pool.query(
@@ -723,13 +756,52 @@ router.post("/:id/extensions/database", async (req, res) => {
   }
 
   // Now accept the file via multer.
-  const upload = buildUpload(quizId);
+  const upload = buildUpload(quizId, engine);
   upload.single("file")(req, res, async (multerErr) => {
     if (multerErr) {
       return res.status(400).json({ error: multerErr.message });
     }
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    if (engine === "postgres") {
+      const templateDbName = `quiz_${quizId}_pg_template`;
+      // req.file.path is the backend-container path (UPLOAD_DIR); postgresOps
+      // reads the dump directly off disk via the shared volume, so no
+      // container-path translation is needed (unlike the SQL Server .bak,
+      // which SQL Server itself reads from its own container's mount).
+      try {
+        await pool.query(
+          `INSERT INTO quiz_db_extensions
+             (quiz_id, template_db_name, backup_file_path, original_filename, status, engine)
+           VALUES ($1, $2, $3, $4, 'restoring', 'postgres')`,
+          [quizId, templateDbName, req.file.path, req.file.originalname]
+        );
+      } catch (err) {
+        fs.unlink(req.file.path, () => {});
+        console.error("Insert extension row error:", err);
+        return res.status(500).json({ error: "Internal server error" });
+      }
+
+      res.json({ status: "restoring" });
+
+      (async () => {
+        try {
+          const { tableCount } = await createPostgresTemplate(quizId, req.file.path);
+          await pool.query(
+            "UPDATE quiz_db_extensions SET status = 'ready', table_count = $1 WHERE quiz_id = $2",
+            [tableCount, quizId]
+          );
+        } catch (err) {
+          console.error(`Postgres template creation failed for quiz ${quizId}:`, err);
+          await pool.query(
+            "UPDATE quiz_db_extensions SET status = 'error', error_message = $1 WHERE quiz_id = $2",
+            [err.message ?? String(err), quizId]
+          ).catch(() => {});
+        }
+      })();
+      return;
     }
 
     // Path inside the sqlserver container (shared volume mounted at different paths).
@@ -739,8 +811,8 @@ router.post("/:id/extensions/database", async (req, res) => {
     try {
       await pool.query(
         `INSERT INTO quiz_db_extensions
-           (quiz_id, template_db_name, backup_file_path, original_filename, status)
-         VALUES ($1, $2, $3, $4, 'restoring')`,
+           (quiz_id, template_db_name, backup_file_path, original_filename, status, engine)
+         VALUES ($1, $2, $3, $4, 'restoring', 'sqlserver')`,
         [quizId, templateDbName, sqlServerBackupPath, req.file.originalname]
       );
     } catch (err) {
@@ -773,7 +845,7 @@ router.post("/:id/extensions/database", async (req, res) => {
 });
 
 // DELETE /api/quizzes/:id/extensions/database
-// Drops the SQL Server template DB, removes the .bak file, deletes the pg row.
+// Drops the template DB (either engine), removes the backup/dump file, deletes the pg row.
 router.delete("/:id/extensions/database", async (req, res) => {
   const quizId = Number(req.params.id);
   if (!Number.isInteger(quizId)) {
@@ -790,21 +862,26 @@ router.delete("/:id/extensions/database", async (req, res) => {
     }
 
     const extResult = await pool.query(
-      "SELECT template_db_name, backup_file_path FROM quiz_db_extensions WHERE quiz_id = $1",
+      "SELECT template_db_name, backup_file_path, engine FROM quiz_db_extensions WHERE quiz_id = $1",
       [quizId]
     );
     if (!extResult.rows[0]) {
       return res.status(404).json({ error: "No database extension found for this quiz" });
     }
 
-    const { template_db_name, backup_file_path } = extResult.rows[0];
+    const { engine } = extResult.rows[0];
 
-    // Drop the SQL Server template DB (IF EXISTS handles partial-failure states).
-    await dropDatabase(template_db_name);
-
-    // Delete the backup file from the shared volume (backend-side path).
-    const localPath = path.join(UPLOAD_DIR, `quiz_${quizId}.bak`);
-    fs.unlink(localPath, () => {});
+    if (engine === "postgres") {
+      await dropPostgresTemplate(quizId);
+      const localPath = path.join(UPLOAD_DIR, `quiz_${quizId}.sql`);
+      fs.unlink(localPath, () => {});
+    } else {
+      const { template_db_name } = extResult.rows[0];
+      // Drop the SQL Server template DB (IF EXISTS handles partial-failure states).
+      await dropDatabase(template_db_name);
+      const localPath = path.join(UPLOAD_DIR, `quiz_${quizId}.bak`);
+      fs.unlink(localPath, () => {});
+    }
 
     // Remove the pg row.
     await pool.query("DELETE FROM quiz_db_extensions WHERE quiz_id = $1", [quizId]);

@@ -4,14 +4,19 @@ const jwt = require("jsonwebtoken");
 const { pool } = require("../db/pool");
 const { requireStudentAuth } = require("../middleware/requireStudentAuth");
 const { restoreDatabase, dropDatabase } = require("../db/sqlServerOps");
-const { executeSql } = require("../db/sqlExecutor");
+const { executeSql: executeSqlServer } = require("../db/sqlExecutor");
+const {
+  createPostgresSandbox,
+  dropPostgresSandbox,
+} = require("../db/postgresOps");
+const { executeSql: executePostgres } = require("../db/postgresExecutor");
 const { closeQuizAndEmit } = require("../db/quizLifecycle");
 
 const router = express.Router();
 
 // Whole-word, case-insensitive matches for operations that must never run,
 // regardless of sandbox isolation (server-wide or filesystem impact).
-const FORBIDDEN_SQL_PATTERNS = [
+const SQLSERVER_FORBIDDEN_SQL_PATTERNS = [
   /\bSHUTDOWN\b/i,
   /\bxp_cmdshell\b/i,
   /\bxp_reg\w*\b/i,
@@ -20,8 +25,22 @@ const FORBIDDEN_SQL_PATTERNS = [
   /\bBACKUP\s+DATABASE\b/i,
 ];
 
-function findForbiddenSql(sqlText) {
-  return FORBIDDEN_SQL_PATTERNS.find((pattern) => pattern.test(sqlText));
+// Postgres equivalent — blocks filesystem access (COPY, pg_read_file),
+// server shutdown, dropping other databases, and installing extensions
+// (which can themselves grant filesystem/network access).
+const POSTGRES_FORBIDDEN_SQL_PATTERNS = [
+  /\bSHUTDOWN\b/i,
+  /\bpg_read_file\b/i,
+  /\bpg_ls_dir\b/i,
+  /\bDROP\s+DATABASE\b/i,
+  /\bCREATE\s+EXTENSION\b/i,
+  /\bCOPY\b[^;]*\b(FROM|TO)\b\s*(PROGRAM\s*)?'/i,
+];
+
+function findForbiddenSql(sqlText, engine) {
+  const patterns =
+    engine === "postgres" ? POSTGRES_FORBIDDEN_SQL_PATTERNS : SQLSERVER_FORBIDDEN_SQL_PATTERNS;
+  return patterns.find((pattern) => pattern.test(sqlText));
 }
 
 // Belt-and-suspenders check — the frontend timer auto-submits before this
@@ -206,7 +225,7 @@ router.post("/quizzes/:id/login", async (req, res) => {
 
     // Check if this quiz has a ready database extension.
     const extResult = await pool.query(
-      `SELECT backup_file_path, template_db_name
+      `SELECT backup_file_path, template_db_name, engine
        FROM quiz_db_extensions
        WHERE quiz_id = $1 AND status = 'ready'`,
       [quizId]
@@ -217,19 +236,24 @@ router.post("/quizzes/:id/login", async (req, res) => {
 
     if (ext && !sandboxDbName) {
       // Provision a fresh sandbox for this student. Synchronous — ~270ms for small
-      // databases, a few seconds for large ones. Students wait for this before
-      // getting their token, which is acceptable given the UX context.
-      const newSandboxName = `sandbox_${submissionId}`;
+      // SQL Server databases (Postgres TEMPLATE copies are effectively instant),
+      // a few seconds for large ones. Students wait for this before getting
+      // their token, which is acceptable given the UX context.
       try {
-        await restoreDatabase(ext.backup_file_path, newSandboxName);
+        if (ext.engine === "postgres") {
+          sandboxDbName = await createPostgresSandbox(submissionId, quizId);
+        } else {
+          const newSandboxName = `sandbox_${submissionId}`;
+          await restoreDatabase(ext.backup_file_path, newSandboxName);
+          sandboxDbName = newSandboxName;
+        }
         await pool.query(
           "UPDATE submissions SET sandbox_db_name = $1 WHERE id = $2",
-          [newSandboxName, submissionId]
+          [sandboxDbName, submissionId]
         );
-        sandboxDbName = newSandboxName;
       } catch (err) {
         console.error(`Sandbox provision failed for submission ${submissionId}:`, err);
-        // Non-fatal: student can still sit the exam without the SQL extension.
+        // Non-fatal: student can still sit the exam without the database extension.
         // A retry on page refresh will attempt provisioning again.
       }
     }
@@ -257,6 +281,7 @@ router.post("/quizzes/:id/login", async (req, res) => {
       pausedAt: quiz.status === "locked" ? quiz.paused_at : null,
       currentlyPaused: quiz.status === "locked",
       hasDatabaseExtension,
+      dbEngine: ext ? ext.engine : null,
       sandboxDbName,
     });
   } catch (err) {
@@ -490,10 +515,16 @@ router.post("/submissions/:submissionId/submit", requireStudentAuth, async (req,
       autoSubmitted: updated.auto_submitted,
     });
 
-    // Drop the student's sandbox after the response is sent — instant for SQL Server
-    // but we don't want any DROP latency in the student's "submitted" screen.
+    // Drop the student's sandbox after the response is sent — instant either
+    // way, but we don't want any DROP latency in the student's "submitted"
+    // screen. The "_pg" suffix (see sandbox naming in public.js login and
+    // postgresOps.createPostgresSandbox) is enough to tell which engine's
+    // drop function to call, without an extra join to quiz_db_extensions.
     if (submission.sandbox_db_name) {
-      dropDatabase(submission.sandbox_db_name).catch((err) => {
+      const drop = submission.sandbox_db_name.endsWith("_pg")
+        ? dropPostgresSandbox
+        : dropDatabase;
+      drop(submission.sandbox_db_name).catch((err) => {
         console.error(`Failed to drop sandbox ${submission.sandbox_db_name}:`, err);
       });
     }
@@ -516,13 +547,6 @@ router.post("/student/execute", requireStudentAuth, async (req, res) => {
   }
   if (typeof sqlText !== "string" || !sqlText.trim()) {
     return res.status(400).json({ error: "sql must be a non-empty string" });
-  }
-
-  const forbidden = findForbiddenSql(sqlText);
-  if (forbidden) {
-    return res.status(400).json({
-      error: `This query contains a disallowed operation (${forbidden.source.replace(/\\b|\\s\+/g, " ").trim()}).`,
-    });
   }
 
   try {
@@ -553,8 +577,20 @@ router.post("/student/execute", requireStudentAuth, async (req, res) => {
         error: "No database sandbox found for this submission. This quiz may not have a database extension.",
       });
     }
-    if (submission.sandbox_db_name !== `sandbox_${submission.id}`) {
+
+    const isPostgres = submission.sandbox_db_name.endsWith("_pg");
+    const expectedSandboxName = isPostgres
+      ? `sandbox_${submission.id}_pg`
+      : `sandbox_${submission.id}`;
+    if (submission.sandbox_db_name !== expectedSandboxName) {
       return res.status(403).json({ error: "Sandbox mismatch for this submission" });
+    }
+
+    const forbidden = findForbiddenSql(sqlText, isPostgres ? "postgres" : "sqlserver");
+    if (forbidden) {
+      return res.status(400).json({
+        error: `This query contains a disallowed operation (${forbidden.source.replace(/\\b|\\s\+/g, " ").trim()}).`,
+      });
     }
 
     const questionCheck = await pool.query(
@@ -565,7 +601,9 @@ router.post("/student/execute", requireStudentAuth, async (req, res) => {
       return res.status(400).json({ error: "Question does not belong to this quiz" });
     }
 
-    const results = await executeSql(submission.sandbox_db_name, sqlText);
+    const results = isPostgres
+      ? await executePostgres(submission.sandbox_db_name, sqlText)
+      : await executeSqlServer(submission.sandbox_db_name, sqlText);
     const success = results.every((r) => r.type !== "error");
     const savedAt = new Date();
 
