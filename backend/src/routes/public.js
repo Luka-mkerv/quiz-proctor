@@ -112,7 +112,7 @@ router.post("/quizzes/:id/login", async (req, res) => {
 
   try {
     const quizResult = await pool.query(
-      `SELECT id, status, duration_seconds, opened_at, total_paused_seconds, paused_at
+      `SELECT id, status, duration_seconds, opened_at, total_paused_seconds, paused_at, monitoring_mode
        FROM quizzes WHERE id = $1`,
       [quizId]
     );
@@ -143,7 +143,7 @@ router.post("/quizzes/:id/login", async (req, res) => {
 
     // Check for an existing submission linked to this enrollment.
     const submissionResult = await pool.query(
-      `SELECT id, started_at, submitted_at, sandbox_db_name FROM submissions WHERE enrollment_id = $1`,
+      `SELECT id, started_at, submitted_at, sandbox_db_name, socket_connected FROM submissions WHERE enrollment_id = $1`,
       [enrollment.id]
     );
     const existing = submissionResult.rows[0];
@@ -156,6 +156,33 @@ router.post("/quizzes/:id/login", async (req, res) => {
       if (existing.submitted_at !== null) {
         return res.status(401).json({ error: "You have already submitted this exam" });
       }
+
+      // Strict mode: a student who was genuinely active in the exam (their socket
+      // connected) and is now trying to log back in must have left the tab —
+      // whether via a successful beforeunload beacon or a lost connection. Either
+      // way, auto-submit here so a failed beacon can't silently leave the exam
+      // resumable and bypass strict mode. socket_connected === false means they
+      // never got past the login screen, so let those resume normally.
+      if (quiz.monitoring_mode === "strict" && existing.socket_connected === true) {
+        const updateResult = await pool.query(
+          `UPDATE submissions
+           SET submitted_at = now(), auto_submitted = true
+           WHERE id = $1
+           RETURNING sandbox_db_name`,
+          [existing.id]
+        );
+        const dropSandboxName = updateResult.rows[0].sandbox_db_name;
+        if (dropSandboxName) {
+          dropDatabase(dropSandboxName).catch((err) => {
+            console.error(`Failed to drop sandbox ${dropSandboxName}:`, err);
+          });
+        }
+        return res.status(409).json({
+          error:
+            "Your attempt was automatically submitted because you left the exam and tried to reconnect. This quiz is set to strict monitoring mode.",
+        });
+      }
+
       // Resume in-progress attempt (e.g. student refreshed the page).
       submissionId = existing.id;
       startedAt = existing.started_at;

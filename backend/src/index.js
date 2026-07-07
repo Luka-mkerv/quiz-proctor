@@ -8,16 +8,36 @@ const authRoutes = require("./routes/auth");
 const quizRoutes = require("./routes/quizzes");
 const publicRoutes = require("./routes/public");
 const { registerSocketHandlers } = require("./socket");
+const { checkOrigin, securityHeaders } = require("./middleware/security");
+const {
+  globalLimiter,
+  loginLimiter,
+  executeLimiter,
+  createQuizLimiter,
+} = require("./middleware/rateLimiters");
 
 const app = express();
 
 const allowedOrigins = (process.env.CORS_ORIGIN || "").split(",").map((o) => o.trim());
 
 app.use(cors({ origin: allowedOrigins }));
+app.use(checkOrigin(allowedOrigins));
+app.use(securityHeaders);
 app.use(express.json());
+app.use(globalLimiter);
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+app.use("/api/auth/login", loginLimiter);
+app.use("/api/public/quizzes/:id/login", loginLimiter);
+app.use("/api/public/student/execute", executeLimiter);
+app.use("/api/quizzes", (req, res, next) => {
+  if (req.method === "POST" && req.path === "/") {
+    return createQuizLimiter(req, res, next);
+  }
+  return next();
 });
 
 app.use("/api/auth", authRoutes);
